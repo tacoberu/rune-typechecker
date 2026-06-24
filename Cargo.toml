@@ -1,6 +1,8 @@
 [package]
-name = "repo"
+name = "rune-typechecker"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+rune = "0.14.2"
+thiserror = "2.0.18"

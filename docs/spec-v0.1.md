@@ -10,14 +10,31 @@ Runtime verifikace mock vstupy (spouštění funkce v sandboxu) je v této verzi
 
 ## Kontrakt — syntaxe doc-commentů
 
-Kontrakt se zapisuje jako doc-comment (`///`) nad kontraktovanou funkcí. Inspirace PHPStan/JSDoc.
+Kontrakt se zapisuje jako doc-comment nad kontraktovanou funkcí — buď řádkový (`///`), nebo blokový (`/** ... */`, dekorační `*` na začátcích řádků se ignorují). Inspirace PHPStan/JSDoc.
+
+```rune
+/**
+ * @param name: String
+ * @return String
+ */
+fn process(name) {
+    return "ok";
+}
+```
+
+Za typem může na řádku následovat volitelný lidský popisek — do kontraktu se nepromítá:
+
+```rune
+/// @param sender: String Kdo zprávu poslal
+/// @return Status::Solved Výsledek zpracování
+```
 
 ### Primitivní typy
 
 ```rune
-/// @param name String
-/// @param age int
-/// @param active bool
+/// @param name: String
+/// @param age: int
+/// @param active: bool
 /// @return String
 fn process(name, age, active) {
     return "ok";
@@ -42,6 +59,18 @@ fn process(input) {
         return Err("empty input");
     }
     return Ok(42);
+}
+```
+
+Samotné jméno enumu (bez vyjmenovaných variant) matchuje libovolnou jeho
+variantu — `@return Status` přijme `Status::Solved` i unii
+`Status::Solved | Status::Continue`. Jakmile jsou varianty vyjmenované,
+porovnávají se přesně.
+
+```rune
+/// @return Status
+fn process(input) {
+    Status::Solved
 }
 ```
 
