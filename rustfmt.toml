@@ -1,0 +1,3 @@
+# Keeps formatting in line with .editorconfig (indent_style = tab) —
+# rustfmt does not read .editorconfig and enforces spaces without this.
+hard_tabs = true
