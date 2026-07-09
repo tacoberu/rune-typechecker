@@ -15,8 +15,8 @@ pub use types::{
 	SignatureRegistry, StaticCheckResult, TypeDef, ValidationReport, Violation,
 };
 
-/// Sestaví [`Contract`] ze stručného zápisu signatury. Syntaxe typů je stejná
-/// jako v doc-comment kontraktech (`@param`/`@return`).
+/// Builds a [`Contract`] from a concise signature notation. The type syntax
+/// is the same as in doc-comment contracts (`@param`/`@return`).
 ///
 /// ```
 /// use rune_typechecker::contract;
@@ -25,9 +25,9 @@ pub use types::{
 /// assert_eq!(expected.params.len(), 2);
 /// ```
 ///
-/// Při neplatné syntaxi panikaří — je určené pro signatury zapsané napevno
-/// v kódu hosta. Pro signatury přicházející za běhu (např. z konfigurace)
-/// použijte [`Contract::parse`], které vrací `Result`.
+/// Panics on invalid syntax — it is meant for signatures hardcoded in host
+/// code. For signatures arriving at runtime (e.g. from configuration) use
+/// [`Contract::parse`], which returns a `Result`.
 #[macro_export]
 macro_rules! contract {
 	($($signature:tt)+) => {
@@ -36,8 +36,8 @@ macro_rules! contract {
 	};
 }
 
-/// Hlavní entry point — validuje skript před uložením (staticky), vč.
-/// rekurzivní verifikace pomocných funkcí dosažených přes `ResolvedCall`.
+/// Main entry point — validates a script before saving (statically),
+/// including recursive verification of helpers reached via `ResolvedCall`.
 pub fn validate_script(
 	source: &str,
 	function_name: &str,
@@ -67,13 +67,15 @@ pub fn validate_script(
 	})
 }
 
-/// Jako [`validate_script`], ale navíc ověří, že kontrakt deklarovaný skriptem
-/// odpovídá signatuře, kterou od funkce očekává hostitelský systém. Neshody
-/// jsou v `report.contract_mismatches` a shazují `report.is_valid`.
+/// Like [`validate_script`], but additionally verifies that the contract
+/// declared by the script matches the signature the host system expects of
+/// the function. Mismatches end up in `report.contract_mismatches` and drop
+/// `report.is_valid`.
 ///
-/// Tím se odchytí i případ, kdy skript kvůli překlepu (`@paran`) nedeklaruje
-/// parametry vůbec — samotný kontrakt je pak konzistentní a `validate_script`
-/// ho pustí, ale s očekávanou signaturou se rozejde.
+/// This also catches the case where a typo (`@paran`) makes the script
+/// declare no parameters at all — the contract itself is then consistent and
+/// `validate_script` lets it through, but it diverges from the expected
+/// signature.
 pub fn validate_script_against(
 	source: &str,
 	function_name: &str,
@@ -95,7 +97,7 @@ fn compare_contracts(expected: &Contract, actual: &Contract) -> Vec<ContractMism
 			actual: actual.params.len(),
 		});
 	}
-	// Jména parametrů si skript volí sám — porovnávají se jen typy.
+	// The script picks its own parameter names — only types are compared.
 	for (index, (exp, act)) in expected.params.iter().zip(&actual.params).enumerate() {
 		if !exp.type_def.is_compatible_with(&act.type_def) {
 			mismatches.push(ContractMismatch::Param {
@@ -154,7 +156,7 @@ fn validate_function(
 			.is_some_and(SignatureOrigin::is_helper);
 
 		if !is_helper_origin {
-			// Vestavěná funkce (skupina 3) — bez těla, nelze ověřit.
+			// Builtin function (group 3) — has no body, cannot be verified.
 			continue;
 		}
 
@@ -184,7 +186,7 @@ fn collect_resolved_call_names(site: &ReturnSite, out: &mut Vec<String>) {
 			}
 		}
 		ReturnSite::PrimitiveLiteral(lv) => collect_resolved_call_names_literal(lv, out),
-		ReturnSite::Unit | ReturnSite::Dynamic(_) => {}
+		ReturnSite::Unit | ReturnSite::Dynamic(_) | ReturnSite::TryPropagation { .. } => {}
 	}
 }
 
@@ -251,7 +253,7 @@ mod tests {
 	fn block_doc_comment_contract_is_checked() {
 		let source = r#"
             /**
-             * @param name: String Jméno uživatele
+             * @param name: String The user's name
              * @return String
              */
             pub fn process(name) {
@@ -281,7 +283,7 @@ mod tests {
 
 	#[test]
 	fn renamed_params_still_match_expected_signature() {
-		// Jména parametrů si skript volí sám — rozhodují jen typy na pozicích.
+		// The script picks its own parameter names — only positional types matter.
 		let source = r#"
             /// @param who: String
             /// @param what: String
@@ -298,8 +300,8 @@ mod tests {
 
 	#[test]
 	fn param_tag_typo_is_caught_by_expected_signature() {
-		// `@paran` parser ignoruje, kontrakt je sám o sobě konzistentní —
-		// neshodu odhalí až porovnání s očekávanou signaturou.
+		// The parser ignores `@paran`; the contract itself is consistent —
+		// only the comparison with the expected signature reveals the mismatch.
 		let source = r#"
             /// @paran sender String
             /// @return Status::Solved
@@ -427,6 +429,208 @@ mod tests {
 	}
 
 	#[test]
+	fn try_operator_propagates_helper_error_variant() {
+		let source = r#"
+            /// @param input: String
+            /// @return Result::Ok(int) | Result::Err(String)
+            fn process(input) {
+                let value = parse(input)?;
+                return Ok(value);
+            }
+
+            /// @param input: String
+            /// @return Result::Ok(int) | Result::Err(String)
+            fn parse(input) {
+                if input == "" {
+                    return Err("empty");
+                }
+                return Ok(42);
+            }
+        "#;
+		let report = validate_script(source, "process", &[]).unwrap();
+		assert!(report.is_valid);
+		// `parse` is a helper reached via `?` — recursively verified.
+		assert!(report.helpers.contains_key("parse"));
+	}
+
+	#[test]
+	fn try_operator_error_variant_not_in_contract_is_violation() {
+		// The contract promises only Ok, but `?` may propagate Err from `parse`.
+		let source = r#"
+            /// @param input: String
+            /// @return Result::Ok(int)
+            fn process(input) {
+                let value = parse(input)?;
+                return Ok(value);
+            }
+
+            /// @param input: String
+            /// @return Result::Ok(int) | Result::Err(String)
+            fn parse(input) {
+                return Ok(42);
+            }
+        "#;
+		let report = validate_script(source, "process", &[]).unwrap();
+		assert!(!report.is_valid);
+		assert_eq!(report.main.static_result.violations.len(), 1);
+		assert!(
+			report.main.static_result.violations[0]
+				.actual
+				.contains("Result::Err")
+		);
+	}
+
+	#[test]
+	fn try_on_unknown_type_without_error_variant_is_violation() {
+		// `?` always propagates None or Err(...) — the `int` contract admits
+		// neither, so it is a definite violation, not an unverifiable site.
+		let source = r#"
+            /// @param input: String
+            /// @return int
+            fn process(input) {
+                let value = input.parse_int()?;
+                return 1;
+            }
+        "#;
+		let report = validate_script(source, "process", &[]).unwrap();
+		assert!(!report.is_valid);
+		assert_eq!(report.main.static_result.violations.len(), 1);
+		assert!(matches!(
+			report.main.static_result.violations[0].site,
+			ReturnSite::TryPropagation { line: 5 }
+		));
+	}
+
+	#[test]
+	fn try_on_unknown_type_with_error_variant_is_unverifiable() {
+		// The contract accounts for Err — we don't know what `?` propagates,
+		// but the error branch is admissible; it stays unverifiable.
+		let source = r#"
+            /// @param input: String
+            /// @return Ok(int) | Err(String)
+            fn process(input) {
+                let value = input.parse_int()?;
+                return Ok(1);
+            }
+        "#;
+		let report = validate_script(source, "process", &[]).unwrap();
+		assert!(report.is_valid);
+		assert!(
+			report
+				.main
+				.static_result
+				.unverifiable
+				.iter()
+				.any(|s| matches!(s, ReturnSite::TryPropagation { line: 5 }))
+		);
+	}
+
+	#[test]
+	fn try_with_bare_result_contract_is_unverifiable() {
+		// The bare enum name `Result` admits Err too — `?` is admissible.
+		let source = r#"
+            /// @param input: String
+            /// @return Result
+            fn process(input) {
+                let value = input.parse_int()?;
+                return Ok(value);
+            }
+        "#;
+		let report = validate_script(source, "process", &[]).unwrap();
+		assert!(report.is_valid);
+		assert!(
+			report
+				.main
+				.static_result
+				.unverifiable
+				.iter()
+				.any(|s| matches!(s, ReturnSite::TryPropagation { .. }))
+		);
+	}
+
+	#[test]
+	fn try_with_nullable_error_contract_is_unverifiable() {
+		// The Nullable wrapper (`| ()`) must not mask an admitted Err variant.
+		let source = r#"
+            /// @param input: String
+            /// @return Result::Ok(int) | Result::Err(String) | ()
+            fn process(input) {
+                let value = input.parse_int()?;
+                return Ok(42);
+            }
+        "#;
+		let report = validate_script(source, "process", &[]).unwrap();
+		assert!(report.is_valid);
+		assert!(
+			report
+				.main
+				.static_result
+				.unverifiable
+				.iter()
+				.any(|s| matches!(s, ReturnSite::TryPropagation { .. }))
+		);
+	}
+
+	#[test]
+	fn try_propagating_none_literal_is_verified() {
+		// `None?` propagates a literal — against a contract with Option::None
+		// it passes as a statically verified site, not merely unverifiable.
+		let source = r#"
+            /// @param input: String
+            /// @return Option::Some(int) | Option::None
+            fn process(input) {
+                None?;
+                return Some(1);
+            }
+        "#;
+		let report = validate_script(source, "process", &[]).unwrap();
+		assert!(report.is_valid);
+		assert!(report.main.static_result.unverifiable.is_empty());
+	}
+
+	#[test]
+	fn try_propagating_err_literal_not_in_contract_is_violation() {
+		let source = r#"
+            /// @param input: String
+            /// @return Result::Ok(int)
+            fn process(input) {
+                Err("boom")?;
+                return Ok(1);
+            }
+        "#;
+		let report = validate_script(source, "process", &[]).unwrap();
+		assert!(!report.is_valid);
+		assert_eq!(report.main.static_result.violations.len(), 1);
+		assert!(
+			report.main.static_result.violations[0]
+				.actual
+				.contains("Result::Err")
+		);
+	}
+
+	#[test]
+	fn try_value_unwraps_ok_inner_type() {
+		let source = r#"
+            /// @param input: String
+            /// @return Result::Ok(int) | Result::Err(String)
+            fn process(input) {
+                Ok(parse(input)?)
+            }
+
+            /// @param input: String
+            /// @return Result::Ok(int) | Result::Err(String)
+            fn parse(input) {
+                return Ok(42);
+            }
+        "#;
+		let report = validate_script(source, "process", &[]).unwrap();
+		assert!(report.is_valid);
+		// Both the tail `Ok(int)` and the propagated `Err(String)` are statically verified.
+		assert!(report.main.static_result.unverifiable.is_empty());
+		assert_eq!(report.main.static_result.verified.len(), 2);
+	}
+
+	#[test]
 	fn contract_macro_builds_expected_types() {
 		let c = contract!((items: [int], meta: { id: int, name: String }) -> String | ());
 		assert_eq!(c.params.len(), 2);
@@ -452,7 +656,7 @@ mod tests {
 
 	#[test]
 	fn broken_contract_is_caught() {
-		// Přesně problém z README: uživatel slíbí String, vrátí int.
+		// Exactly the README problem: the user promises String, returns int.
 		let source = r#"
             /// @return String
             fn process(input) {
@@ -513,10 +717,10 @@ mod tests {
             }
         "#;
 		let report = validate_script(source, "process", &[]).unwrap();
-		// Volající očekává int a helper deklaruje int, takže samotné
-		// ResolvedCall na úrovni `process` je verified...
+		// The caller expects int and the helper declares int, so the
+		// ResolvedCall itself is verified at the `process` level...
 		assert!(report.main.is_valid);
-		// ...ale helper svůj vlastní kontrakt neplní, takže celý skript neprojde.
+		// ...but the helper breaks its own contract, so the whole script fails.
 		assert!(!report.helpers["helper"].is_valid);
 		assert!(!report.is_valid);
 	}

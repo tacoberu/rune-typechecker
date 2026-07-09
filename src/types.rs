@@ -38,14 +38,14 @@ pub struct EnumVariant {
 }
 
 impl EnumVariant {
-	/// `Status` — samotné jméno enumu (jednosegmentová cesta bez vnitřní
-	/// hodnoty). Dokud nejsou varianty vyjmenované, matchuje libovolnou
-	/// variantu téhož enumu (`Status::*`).
+	/// `Status` — a bare enum name (single-segment path with no inner value).
+	/// As long as no variants are enumerated, it matches any variant of the
+	/// same enum (`Status::*`).
 	pub fn is_bare_enum_name(&self) -> bool {
 		self.path.len() == 1 && self.inner.is_none()
 	}
 
-	/// Zda tato deklarovaná alternativa přijímá enum variantu s cestou `path`.
+	/// Whether this declared alternative accepts an enum variant with the given `path`.
 	pub fn accepts_path(&self, path: &[String]) -> bool {
 		if self.is_bare_enum_name() {
 			self.path.first() == path.first()
@@ -54,8 +54,9 @@ impl EnumVariant {
 		}
 	}
 
-	/// Jmenné porovnání dvou alternativ (symetrické): je-li jedna strana
-	/// samotné jméno enumu, stačí shoda enumu; jinak se porovnávají varianty.
+	/// Name-level comparison of two alternatives (symmetric): if one side is a
+	/// bare enum name, matching the enum is enough; otherwise variants are
+	/// compared.
 	pub fn matches_name(&self, other: &EnumVariant) -> bool {
 		if self.is_bare_enum_name() || other.is_bare_enum_name() {
 			self.path.first() == other.path.first()
@@ -64,8 +65,8 @@ impl EnumVariant {
 		}
 	}
 
-	/// Kompatibilita vč. vnitřní hodnoty — ta se kontroluje jen mezi
-	/// konkrétními variantami, samotné jméno enumu o payloadu nic neříká.
+	/// Compatibility including the inner value — it is only checked between
+	/// concrete variants; a bare enum name says nothing about the payload.
 	pub fn is_compatible_with(&self, other: &EnumVariant) -> bool {
 		if !self.matches_name(other) {
 			return false;
@@ -82,9 +83,9 @@ impl EnumVariant {
 }
 
 impl TypeDef {
-	/// Symetrická kompatibilita dvou deklarovaných typů. Na rozdíl od `==`
-	/// bere samotné jméno enumu (`Status`) jako match libovolné unie jeho
-	/// variant (`Status::Solved | Status::Continue`) — a naopak.
+	/// Symmetric compatibility of two declared types. Unlike `==`, a bare enum
+	/// name (`Status`) matches any union of its variants
+	/// (`Status::Solved | Status::Continue`) — and vice versa.
 	pub fn is_compatible_with(&self, other: &TypeDef) -> bool {
 		match (self, other) {
 			(TypeDef::Primitive(a), TypeDef::Primitive(b)) => a == b,
@@ -109,9 +110,9 @@ impl TypeDef {
 	}
 }
 
-// Typy se vypisují ve stejné syntaxi, jakou používá zápis kontraktů
-// (`@param`/`@return` i `Contract::parse`), takže hlášky lze číst — a případně
-// rovnou zkopírovat — jako kontrakt.
+// Types are displayed in the same syntax the contract notation uses (both
+// `@param`/`@return` and `Contract::parse`), so messages can be read — and if
+// needed copied verbatim — as a contract.
 
 impl std::fmt::Display for PrimitiveType {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -168,19 +169,19 @@ impl std::fmt::Display for TypeDef {
 	}
 }
 
-/// Signatura vestavěné funkce dodaná hostitelským systémem (skupina 3).
+/// Signature of a builtin function supplied by the host system (group 3).
 #[derive(Debug, Clone, PartialEq)]
 pub struct BuiltinSignature {
 	pub name: String,
 	pub return_type: TypeDef,
 }
 
-/// Původ návratového typu v `SignatureRegistry`.
+/// Origin of a return type in the `SignatureRegistry`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SignatureOrigin {
-	/// Pomocná funkce ze skriptu — má tělo, bude rekurzivně ověřena při ResolvedCall.
+	/// Script helper function — has a body; recursively verified on ResolvedCall.
 	Helper(TypeDef),
-	/// Vestavěná funkce — bez těla, přijímá se tak, jak je dodaná.
+	/// Builtin function — has no body; accepted as supplied.
 	Builtin(TypeDef),
 }
 
@@ -202,18 +203,21 @@ pub struct SignatureRegistry {
 	pub signatures: HashMap<String, SignatureOrigin>,
 }
 
-/// Proč konkrétní výraz nešel staticky vyhodnotit (viz docs/future-type-inference.md).
+/// Why a particular expression could not be evaluated statically (see docs/future-type-inference.md).
 #[derive(Debug, Clone, PartialEq)]
 pub enum DynamicReason {
-	/// return x; — lokální proměnná, bez sledování dataflow.
+	/// return x; — a local variable, no dataflow tracking.
 	Variable(String),
-	/// return helper(x); helper nenalezen v SignatureRegistry.
+	/// return helper(x); helper not found in the SignatureRegistry.
 	UnannotatedCall(String),
-	/// return f(x); kde f je výraz/proměnná, ne přímo jméno funkce.
+	/// return f(x); where f is an expression/variable, not a function name.
 	IndirectCall,
-	/// return value.compute(); — metoda na hodnotě.
+	/// return value.compute(); — a method call on a value.
 	MethodCall(String),
-	/// Operátor, field/index access, libovolný jiný výraz.
+	/// `expr?` on an expression of unknown type — may propagate an error
+	/// variant we do not know statically.
+	TryPropagation,
+	/// An operator, field/index access, or any other expression.
 	Expression,
 }
 
@@ -251,6 +255,11 @@ pub enum ReturnSite {
 		type_def: TypeDef,
 	},
 	Dynamic(DynamicReason),
+	/// The `?` operator — a hidden early return; on None/Err it exits the
+	/// function with a value the contract typically does not admit.
+	TryPropagation {
+		line: usize,
+	},
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -275,20 +284,20 @@ pub struct ValidationReport {
 	pub is_valid: bool,
 }
 
-/// Neshoda mezi kontraktem deklarovaným skriptem a signaturou, kterou od
-/// funkce očekává hostitelský systém (viz `validate_script_against`).
+/// Mismatch between the contract declared by the script and the signature
+/// the host system expects of the function (see `validate_script_against`).
 #[derive(Debug, Clone, PartialEq)]
 pub enum ContractMismatch {
-	/// Skript deklaruje jiný počet parametrů, než host očekává.
+	/// The script declares a different number of parameters than the host expects.
 	ParamCount { expected: usize, actual: usize },
-	/// Parametr na dané pozici se liší typem (jména se neporovnávají —
-	/// skript si parametry pojmenovává podle svého).
+	/// The parameter at the given position differs in type (names are not
+	/// compared — the script names its parameters as it likes).
 	Param {
 		index: usize,
 		expected: ParamDef,
 		actual: ParamDef,
 	},
-	/// Návratový typ se liší.
+	/// The return type differs.
 	ReturnType { expected: TypeDef, actual: TypeDef },
 }
 
@@ -321,8 +330,8 @@ impl std::fmt::Display for ContractMismatch {
 pub struct ScriptValidationReport {
 	pub main: ValidationReport,
 	pub helpers: HashMap<String, ValidationReport>,
-	/// Neshody vůči signatuře očekávané hostem — plní jen
-	/// `validate_script_against`; `validate_script` nechává prázdné.
+	/// Mismatches against the host-expected signature — filled only by
+	/// `validate_script_against`; `validate_script` leaves it empty.
 	pub contract_mismatches: Vec<ContractMismatch>,
 	pub is_valid: bool,
 }

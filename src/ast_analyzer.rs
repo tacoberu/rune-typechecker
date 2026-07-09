@@ -2,15 +2,17 @@ use rune::SourceId;
 use rune::ast;
 use rune::ast::OptionSpanned;
 
-use crate::source_text::{lit_str_value, slice};
-use crate::types::{CheckerError, DynamicReason, LiteralValue, ReturnSite, SignatureRegistry};
+use crate::source_text::{line_of, lit_str_value, slice};
+use crate::types::{
+	CheckerError, DynamicReason, EnumVariant, LiteralValue, ReturnSite, SignatureRegistry, TypeDef,
+};
 
 pub fn parse_file(source: &str) -> Result<ast::File, CheckerError> {
 	rune::parse::parse_all::<ast::File>(source, SourceId::EMPTY, false)
 		.map_err(|e| CheckerError::RuneParseError(e.to_string()))
 }
 
-/// Najde v souboru top-level funkci podle jména. Vrací `None`, pokud neexistuje.
+/// Finds a top-level function in the file by name. Returns `None` if it does not exist.
 pub fn find_function<'a>(file: &'a ast::File, source: &str, name: &str) -> Option<&'a ast::ItemFn> {
 	file.items.iter().find_map(|(item, _)| match item {
 		ast::Item::Fn(item_fn) if slice(source, item_fn.name.span) == name => Some(item_fn),
@@ -18,19 +20,19 @@ pub fn find_function<'a>(file: &'a ast::File, source: &str, name: &str) -> Optio
 	})
 }
 
-/// Vrátí spojený obsah doc-commentu bezprostředně předcházejícího danou
-/// funkci, nebo `None`, pokud žádný není. Podporují se oba formáty:
-/// řádkový `///` (řádky beze prefixu) i blokový `/** ... */` (řádky bez
-/// dekoračních `*` na začátku).
+/// Returns the joined content of the doc-comment immediately preceding the
+/// given function, or `None` if there is none. Both formats are supported:
+/// line style `///` (lines without the prefix) and block style `/** ... */`
+/// (lines without the decorative leading `*`).
 ///
-/// Implementováno jako prosté skenování zdrojového textu zpětně od začátku
-/// funkce, ne přes `ItemFn::attributes` — atributy `#[doc = ...]" syntetizované
-/// z `///` se v rune dají rozeznat jen přes interní (`pub(crate)`) resolve
-/// mechanismus, který odsud není dostupný.
+/// Implemented as a plain backwards scan of the source text from the start of
+/// the function, not via `ItemFn::attributes` — the `#[doc = ...]` attributes
+/// synthesized from `///` can only be recognized in rune through an internal
+/// (`pub(crate)`) resolve mechanism that is not accessible from here.
 pub fn doc_comment_before(file_source: &str, item_fn: &ast::ItemFn) -> Option<String> {
-	// Skenovat je potřeba od úplného začátku deklarace — `pub`/`const`/`async`
-	// stojí před `fn` tokenem a jinak by zpětný průchod skončil na fragmentu
-	// řádku s modifikátorem místo na doc-commentu.
+	// Scanning must start from the very beginning of the declaration —
+	// `pub`/`const`/`async` precede the `fn` token, and otherwise the backward
+	// pass would stop at the modifier line fragment instead of the doc-comment.
 	let start = item_fn
 		.visibility
 		.option_span()
@@ -46,7 +48,7 @@ pub fn doc_comment_before(file_source: &str, item_fn: &ast::ItemFn) -> Option<St
 	line_doc_comment(before).or_else(|| block_doc_comment(before))
 }
 
-/// Řádkový formát: souvislý blok `///` řádků těsně nad deklarací.
+/// Line format: a contiguous block of `///` lines right above the declaration.
 fn line_doc_comment(before: &str) -> Option<String> {
 	let mut doc_lines = Vec::new();
 	for line in before.lines().rev() {
@@ -69,16 +71,16 @@ fn line_doc_comment(before: &str) -> Option<String> {
 	Some(doc_lines.join("\n"))
 }
 
-/// Blokový formát: `/** ... */` končící těsně nad deklarací. Z každého řádku
-/// obsahu se odstraní dekorační `*` na začátku (styl JSDoc).
+/// Block format: `/** ... */` ending right above the declaration. Each content
+/// line has its decorative leading `*` stripped (JSDoc style).
 fn block_doc_comment(before: &str) -> Option<String> {
 	let trimmed = before.trim_end();
 	let content = trimmed.strip_suffix("*/")?;
 	let open = content.rfind("/**")?;
 	let content = &content[open + 3..];
 	if content.contains("*/") {
-		// Nalezené `/**` patří dřívějšímu, už uzavřenému komentáři — blok
-		// těsně nad funkcí je obyčejný `/* ... */`.
+		// The found `/**` belongs to an earlier, already closed comment — the
+		// block right above the function is a plain `/* ... */`.
 		return None;
 	}
 
@@ -98,8 +100,8 @@ fn block_doc_comment(before: &str) -> Option<String> {
 	Some(joined.to_string())
 }
 
-/// Najde všechna místa, kde funkce `item_fn` vrací hodnotu (explicitní `return`
-/// kdekoliv v těle, i implicitní tail-expression).
+/// Finds all sites where `item_fn` returns a value (explicit `return`
+/// anywhere in the body, as well as the implicit tail expression).
 pub fn find_return_sites(
 	item_fn: &ast::ItemFn,
 	source: &str,
@@ -112,7 +114,7 @@ pub fn find_return_sites(
 }
 
 // ---------------------------------------------------------------------------
-// Explicitní `return` kdekoliv v těle (vč. vnořených if/match/loop blocků).
+// Explicit `return` anywhere in the body (incl. nested if/match/loop blocks).
 // ---------------------------------------------------------------------------
 
 fn scan_returns_in_block(
@@ -185,7 +187,13 @@ fn scan_returns_in_expr(
 		}
 		ast::Expr::Unary(u) => scan_returns_in_expr(&u.expr, source, registry, out),
 		ast::Expr::Group(g) => scan_returns_in_expr(&g.expr, source, registry, out),
-		ast::Expr::Try(t) => scan_returns_in_expr(&t.expr, source, registry, out),
+		ast::Expr::Try(t) => {
+			scan_returns_in_expr(&t.expr, source, registry, out);
+			// `expr?` is a hidden early return of the error variant.
+			if let Some(site) = try_early_return_site(t, source, registry) {
+				out.push(site);
+			}
+		}
 		ast::Expr::Await(a) => scan_returns_in_expr(&a.expr, source, registry, out),
 		ast::Expr::Assign(a) => {
 			scan_returns_in_expr(&a.lhs, source, registry, out);
@@ -224,8 +232,8 @@ fn scan_returns_in_expr(
 				scan_returns_in_expr(inner, source, registry, out);
 			}
 		}
-		// Uzávěry mají vlastní návratový rozsah — `return` uvnitř patří jim, ne
-		// tělu okolní funkce.
+		// Closures have their own return scope — a `return` inside belongs to
+		// them, not to the surrounding function body.
 		ast::Expr::Closure(_) => {}
 		_ => {}
 	}
@@ -247,17 +255,17 @@ fn scan_returns_in_condition(
 }
 
 // ---------------------------------------------------------------------------
-// Implicitní (tail) návratová hodnota těla funkce.
+// Implicit (tail) return value of the function body.
 // ---------------------------------------------------------------------------
 
 enum BlockTail<'a> {
-	/// Blok implicitně vyhodnotí na `()` (poslední statement nemá hodnotu).
+	/// The block implicitly evaluates to `()` (the last statement has no value).
 	Unit,
-	/// Poslední statement je výraz bez `;` — jeho hodnota je hodnotou bloku.
+	/// The last statement is an expression without `;` — its value is the block's value.
 	Expr(&'a ast::Expr),
-	/// Poslední statement je (semikolonem zakončené) `return ...;` — k němu
-	/// už existuje záznam z `scan_returns_in_block`, blok sám nic dalšího
-	/// nevrací (`return` je divergentní, "pád" na konec bloku nenastane).
+	/// The last statement is a (semicolon-terminated) `return ...;` — it is
+	/// already recorded by `scan_returns_in_block`, and the block itself
+	/// returns nothing further (`return` diverges, no fall-through occurs).
 	Diverges,
 }
 
@@ -318,7 +326,7 @@ fn collect_tail_sites_expr(
 }
 
 // ---------------------------------------------------------------------------
-// Klasifikace jednotlivého výrazu na LiteralValue / ReturnSite.
+// Classification of a single expression into LiteralValue / ReturnSite.
 // ---------------------------------------------------------------------------
 
 fn classify_top(expr: &ast::Expr, source: &str, registry: &SignatureRegistry) -> ReturnSite {
@@ -348,7 +356,111 @@ fn classify_value(expr: &ast::Expr, source: &str, registry: &SignatureRegistry) 
 		ast::Expr::Path(path) => classify_bare_path(path, source),
 		ast::Expr::Group(g) => classify_value(&g.expr, source, registry),
 		ast::Expr::Tuple(t) if t.items.is_empty() => LiteralValue::Unit,
+		ast::Expr::Try(t) => classify_try_value(&t.expr, source, registry),
 		_ => LiteralValue::Dynamic(DynamicReason::Expression),
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The `?` operator — propagation of Result::Err / Option::None.
+// ---------------------------------------------------------------------------
+
+/// Error variants that `expr?` propagates out of the function: `Result::Err`,
+/// `Option::None`, or a bare `Result`/`Option` enum name (no variants
+/// enumerated — anything of theirs may propagate).
+fn try_error_variants(variants: &[EnumVariant]) -> Vec<EnumVariant> {
+	variants
+		.iter()
+		.filter(|v| {
+			if v.is_bare_enum_name() {
+				matches!(v.path[0].as_str(), "Result" | "Option")
+			} else {
+				matches!(
+					v.path.last().map(String::as_str),
+					Some("Err") | Some("None")
+				)
+			}
+		})
+		.cloned()
+		.collect()
+}
+
+/// The type `expr?` evaluates to when it does not propagate — the inner value
+/// of `Result::Ok`/`Option::Some`. `None` = cannot be determined statically.
+fn try_success_type(variants: &[EnumVariant]) -> Option<TypeDef> {
+	let success = variants
+		.iter()
+		.find(|v| matches!(v.path.last().map(String::as_str), Some("Ok") | Some("Some")))?;
+	Some(match &success.inner {
+		Some(inner) => (**inner).clone(),
+		None => TypeDef::Unit,
+	})
+}
+
+/// The return site through which `expr?` may leave the function (the error
+/// branch), or `None` when the declared/literal type implies there is nothing
+/// to propagate.
+fn try_early_return_site(
+	try_expr: &ast::ExprTry,
+	source: &str,
+	registry: &SignatureRegistry,
+) -> Option<ReturnSite> {
+	match classify_value(&try_expr.expr, source, registry) {
+		LiteralValue::ResolvedCall {
+			name,
+			type_def: TypeDef::Enum(variants),
+		} => {
+			let errors = try_error_variants(&variants);
+			if errors.is_empty() {
+				None
+			} else {
+				Some(ReturnSite::ResolvedCall {
+					name,
+					type_def: TypeDef::Enum(errors),
+				})
+			}
+		}
+		// A declared non-enum type — `?` has no error branch to propagate.
+		LiteralValue::ResolvedCall { .. } => None,
+		LiteralValue::Enum { path, inner } => {
+			match path.last().map(String::as_str) {
+				// `Err(e)?` / `None?` propagates the literal as-is.
+				Some("Err") | Some("None") => Some(ReturnSite::EnumLiteral { path, inner }),
+				_ => None,
+			}
+		}
+		// Unknown type — anything may propagate; statically unverifiable.
+		LiteralValue::Dynamic(_) => Some(ReturnSite::TryPropagation {
+			line: line_of(source, try_expr.try_token.span),
+		}),
+		// Other literals (String, int, …) — `?` on them has nothing to propagate.
+		_ => None,
+	}
+}
+
+/// The value of `expr?` in the success branch (unwrapped `Ok`/`Some`).
+fn classify_try_value(
+	inner: &ast::Expr,
+	source: &str,
+	registry: &SignatureRegistry,
+) -> LiteralValue {
+	match classify_value(inner, source, registry) {
+		LiteralValue::ResolvedCall {
+			name,
+			type_def: TypeDef::Enum(variants),
+		} => match try_success_type(&variants) {
+			Some(type_def) => LiteralValue::ResolvedCall { name, type_def },
+			None => LiteralValue::Dynamic(DynamicReason::TryPropagation),
+		},
+		LiteralValue::Enum { path, inner }
+			if matches!(path.last().map(String::as_str), Some("Ok") | Some("Some")) =>
+		{
+			match inner {
+				Some(value) => *value,
+				None => LiteralValue::Unit,
+			}
+		}
+		_ => LiteralValue::Dynamic(DynamicReason::TryPropagation),
 	}
 }
 
@@ -414,7 +526,7 @@ fn classify_object(
 
 		let value = match &assign.assign {
 			Some((_, value_expr)) => classify_value(value_expr, source, registry),
-			// Zkrácený zápis `{ x }` == `{ x: x }` — odkaz na proměnnou.
+			// Shorthand `{ x }` == `{ x: x }` — a reference to a variable.
 			None => LiteralValue::Dynamic(DynamicReason::Variable(key.clone())),
 		};
 
@@ -443,7 +555,7 @@ fn classify_bare_path(path: &ast::Path, source: &str) -> LiteralValue {
 }
 
 fn classify_call(call: &ast::ExprCall, source: &str, registry: &SignatureRegistry) -> LiteralValue {
-	// Volání metody, např. `value.compute()` — callee je field access, ne path.
+	// A method call, e.g. `value.compute()` — the callee is a field access, not a path.
 	if let ast::Expr::FieldAccess(fa) = call.expr.as_ref() {
 		let method = match &fa.expr_field {
 			ast::ExprField::Path(p) => path_segments(p, source)
@@ -456,7 +568,7 @@ fn classify_call(call: &ast::ExprCall, source: &str, registry: &SignatureRegistr
 	}
 
 	let ast::Expr::Path(path) = call.expr.as_ref() else {
-		// Nepřímé volání, např. `f(x)` kde `f` je libovolný jiný výraz.
+		// An indirect call, e.g. `f(x)` where `f` is any other expression.
 		return LiteralValue::Dynamic(DynamicReason::IndirectCall);
 	};
 
@@ -517,8 +629,8 @@ fn canonical_builtin_variant(segments: &[String]) -> Option<Vec<String>> {
 	}
 }
 
-/// Rozloží `Path` na textové segmenty, pokud jde čistě o identifikátory
-/// (žádné `Self`/`super`/`crate`/generika) bez vedoucí/koncové `::`.
+/// Splits a `Path` into text segments when it consists purely of identifiers
+/// (no `Self`/`super`/`crate`/generics) with no leading/trailing `::`.
 fn path_segments(path: &ast::Path, source: &str) -> Option<Vec<String>> {
 	if path.global.is_some() || path.trailing.is_some() {
 		return None;
@@ -844,7 +956,7 @@ mod tests {
 
 	#[test]
 	fn block_doc_of_earlier_function_does_not_leak() {
-		let source = "/** @return int */\nfn other() {\n    1\n}\n\n/* poznámka */\nfn process() {\n    return \"x\";\n}\n";
+		let source = "/** @return int */\nfn other() {\n    1\n}\n\n/* a note */\nfn process() {\n    return \"x\";\n}\n";
 		let file = parse_file(source).unwrap();
 		let item_fn = find_function(&file, source, "process").unwrap();
 		assert!(doc_comment_before(source, item_fn).is_none());

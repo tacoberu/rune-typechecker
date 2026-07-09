@@ -1,12 +1,30 @@
 use crate::types::{
-	Contract, EnumVariant, LiteralValue, PrimitiveType, ReturnSite, StaticCheckResult, TypeDef,
-	Violation,
+	Contract, DynamicReason, EnumVariant, LiteralValue, PrimitiveType, ReturnSite,
+	StaticCheckResult, TypeDef, Violation,
 };
 
 pub fn check(sites: &[ReturnSite], contract: &Contract) -> StaticCheckResult {
 	let mut result = StaticCheckResult::default();
 
 	for site in sites {
+		// `?` on an unknown type — we don't know what it propagates, but we
+		// know it is always None or Err(...). If the contract admits neither,
+		// it is a definite violation; otherwise it is statically unverifiable.
+		if let ReturnSite::TryPropagation { line } = site {
+			if admits_try_propagation(&contract.return_type) {
+				result.unverifiable.push(site.clone());
+			} else {
+				result.violations.push(Violation {
+					site: site.clone(),
+					expected: contract.return_type.clone(),
+					actual: format!(
+						"the `?` operator (line {line}) may exit the function early with a None/Err value the contract does not admit"
+					),
+				});
+			}
+			continue;
+		}
+
 		if matches!(site, ReturnSite::Dynamic(_)) {
 			result.unverifiable.push(site.clone());
 			continue;
@@ -27,6 +45,25 @@ pub fn check(sites: &[ReturnSite], contract: &Contract) -> StaticCheckResult {
 	result
 }
 
+/// `?` can only leave the function with None or Err(...) — the contract
+/// admits that if it declares such a variant (or a whole Option/Result).
+fn admits_try_propagation(expected: &TypeDef) -> bool {
+	match expected {
+		TypeDef::Enum(variants) => variants.iter().any(|v| {
+			if v.is_bare_enum_name() {
+				matches!(v.path[0].as_str(), "Result" | "Option")
+			} else {
+				matches!(
+					v.path.last().map(String::as_str),
+					Some("Err") | Some("None")
+				)
+			}
+		}),
+		TypeDef::Nullable(inner) => admits_try_propagation(inner),
+		_ => false,
+	}
+}
+
 fn site_as_literal(site: &ReturnSite) -> LiteralValue {
 	match site.clone() {
 		ReturnSite::ObjectLiteral(fields) => LiteralValue::Object(fields),
@@ -37,6 +74,8 @@ fn site_as_literal(site: &ReturnSite) -> LiteralValue {
 			LiteralValue::ResolvedCall { name, type_def }
 		}
 		ReturnSite::Dynamic(reason) => LiteralValue::Dynamic(reason),
+		// Already handled in `check` (unverifiable/violation) — never reached.
+		ReturnSite::TryPropagation { .. } => LiteralValue::Dynamic(DynamicReason::TryPropagation),
 	}
 }
 
@@ -156,8 +195,8 @@ fn compare_enum(
 	};
 
 	if variant.is_bare_enum_name() {
-		// Samotné jméno enumu o vnitřní hodnotě variant nic neříká —
-		// přijímá se libovolná.
+		// A bare enum name says nothing about the variants' inner values —
+		// any is accepted.
 		return Outcome::Verified;
 	}
 
@@ -176,8 +215,8 @@ enum TypeOutcome {
 	Violation(String),
 }
 
-/// Strukturální porovnání dvou deklarovaných typů (pro `ResolvedCall` — typ
-/// volané funkce/pomocné funkce proti typu, který očekává volající).
+/// Structural comparison of two declared types (for `ResolvedCall` — the type
+/// of the called helper/builtin against the type the caller expects).
 fn compare_types(expected: &TypeDef, actual: &TypeDef) -> TypeOutcome {
 	match (expected, actual) {
 		(TypeDef::Primitive(e), TypeDef::Primitive(a)) if e == a => TypeOutcome::Verified,
@@ -212,7 +251,7 @@ fn compare_types(expected: &TypeDef, actual: &TypeDef) -> TypeOutcome {
 					));
 				};
 				if expected_variant.is_bare_enum_name() || actual_variant.is_bare_enum_name() {
-					// Samotné jméno enumu o vnitřní hodnotě nic neříká.
+					// A bare enum name says nothing about the inner value.
 					continue;
 				}
 				match (&expected_variant.inner, &actual_variant.inner) {
@@ -396,8 +435,8 @@ mod tests {
 
 	#[test]
 	fn bare_enum_name_accepts_any_variant() {
-		// `@return Status` — bez vyjmenovaných variant projde libovolná
-		// varianta enumu Status, i s vnitřní hodnotou.
+		// `@return Status` — with no enumerated variants, any variant of the
+		// Status enum passes, inner value included.
 		let bare = contract(TypeDef::Enum(vec![EnumVariant {
 			path: vec!["Status".into()],
 			inner: None,

@@ -4,12 +4,21 @@ pub fn slice<'a>(source: &'a str, span: Span) -> &'a str {
 	&source[span.start.into_usize()..span.end.into_usize()]
 }
 
-/// Vrátí textový obsah řetězcového literálu tak, jak je zapsaný ve zdrojovém
-/// kódu (bez okolních uvozovek, s rozbalenými běžnými escape sekvencemi).
+/// Line number (1-based) on which the given span starts.
+pub fn line_of(source: &str, span: Span) -> usize {
+	source[..span.start.into_usize()]
+		.bytes()
+		.filter(|b| *b == b'\n')
+		.count()
+		+ 1
+}
+
+/// Returns the text content of a string literal as written in the source
+/// code (without the surrounding quotes, with common escape sequences expanded).
 pub fn lit_str_value(source: &str, span: Span, str_source: &StrSource) -> String {
 	let StrSource::Text(text) = str_source else {
-		// Syntetický literál (vznikl v makru) — v parsovaném uživatelském
-		// skriptu nenastává, ale ať to nepanikaří.
+		// A synthetic literal (created in a macro) — does not occur in parsed
+		// user scripts, but let's not panic on it.
 		return String::new();
 	};
 

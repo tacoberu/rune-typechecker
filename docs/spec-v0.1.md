@@ -1,16 +1,16 @@
-# Rune Contract Checker — Specifikace
+# Rune Contract Checker — Specification
 
-## Přehled
+## Overview
 
-Systém pro statickou verifikaci uživatelských Rune skriptů před jejich uložením. Uživatel deklaruje kontrakt pomocí doc-comment anotací nad funkcí. Checker ověří, že implementace kontrakt splňuje, pokud je to staticky možné.
+A system for static verification of user-written Rune scripts before they are saved. The user declares a contract using doc-comment annotations above a function. The checker verifies that the implementation satisfies the contract wherever that is statically possible.
 
-Runtime verifikace mock vstupy (spouštění funkce v sandboxu) je v této verzi mimo rozsah — viz [`docs/future-runtime-verifier.md`](./future-runtime-verifier.md). Stejně tak je mimo rozsah type inference (sledování proměnných, typování výrazů) — `AstAnalyzer` je ale navržen tak, aby šlo toto rozšíření doplnit postupně, viz [`docs/future-type-inference.md`](./future-type-inference.md).
+Runtime verification with mock inputs (running the function in a sandbox) is out of scope in this version — see [`docs/future-runtime-verifier.md`](./future-runtime-verifier.md). Type inference (variable tracking, expression typing) is out of scope as well — `AstAnalyzer` is however designed so that this extension can be added incrementally, see [`docs/future-type-inference.md`](./future-type-inference.md).
 
 ---
 
-## Kontrakt — syntaxe doc-commentů
+## Contract — doc-comment syntax
 
-Kontrakt se zapisuje jako doc-comment nad kontraktovanou funkcí — buď řádkový (`///`), nebo blokový (`/** ... */`, dekorační `*` na začátcích řádků se ignorují). Inspirace PHPStan/JSDoc.
+The contract is written as a doc-comment above the contracted function — either line style (`///`) or block style (`/** ... */`, decorative `*` at line starts are ignored). Inspired by PHPStan/JSDoc.
 
 ```rune
 /**
@@ -22,14 +22,14 @@ fn process(name) {
 }
 ```
 
-Za typem může na řádku následovat volitelný lidský popisek — do kontraktu se nepromítá:
+The type may be followed on the line by an optional human description — it does not affect the contract:
 
 ```rune
-/// @param sender: String Kdo zprávu poslal
-/// @return Status::Solved Výsledek zpracování
+/// @param sender: String Who sent the message
+/// @return Status::Solved Processing outcome
 ```
 
-### Primitivní typy
+### Primitive types
 
 ```rune
 /// @param name: String
@@ -50,7 +50,7 @@ fn process(input) {
 }
 ```
 
-### Enum varianta
+### Enum variant
 
 ```rune
 /// @return Result::Ok(int) | Result::Err(String)
@@ -62,10 +62,10 @@ fn process(input) {
 }
 ```
 
-Samotné jméno enumu (bez vyjmenovaných variant) matchuje libovolnou jeho
-variantu — `@return Status` přijme `Status::Solved` i unii
-`Status::Solved | Status::Continue`. Jakmile jsou varianty vyjmenované,
-porovnávají se přesně.
+A bare enum name (with no enumerated variants) matches any of its variants —
+`@return Status` accepts `Status::Solved` as well as the union
+`Status::Solved | Status::Continue`. Once variants are enumerated, they are
+compared exactly.
 
 ```rune
 /// @return Status
@@ -74,7 +74,7 @@ fn process(input) {
 }
 ```
 
-### Vnořené typy
+### Nested types
 
 ```rune
 /// @return { status: String, data: { id: int, name: String } }
@@ -83,7 +83,7 @@ fn process(input) {
 }
 ```
 
-### Seznam (List)
+### List
 
 ```rune
 /// @return [String]
@@ -92,7 +92,7 @@ fn process(input) {
 }
 ```
 
-Lze kombinovat s ostatními typy, např. `{ items: [int] }` nebo `[{ id: int, name: String }]`.
+Can be combined with the other types, e.g. `{ items: [int] }` or `[{ id: int, name: String }]`.
 
 ### Nullable / optional
 
@@ -106,53 +106,79 @@ fn process(input) {
 }
 ```
 
+### The `?` operator
+
+`expr?` is a hidden early return of the error variant (`Result::Err` /
+`Option::None`). The checker captures it as a separate return site:
+
+- If the expression's type is declared (a call to a helper/builtin with a
+  contract), the propagated error variants are verified against the calling
+  function's contract — the contract must therefore admit `Result::Err(...)`
+  (resp. `Option::None`).
+- The value of `expr?` in the success branch is the unwrapped content of
+  `Result::Ok` / `Option::Some`.
+- On an expression of unknown type, `?` always propagates `None` or
+  `Err(...)` — if the contract admits neither (no `Err`/`None` variant nor a
+  whole `Result`/`Option`), it is a definite contract violation. If the
+  contract admits it, it is a statically unverifiable site
+  (`ReturnSite::TryPropagation { line }` — with the line number for reporting).
+
+```rune
+/// @param input: String
+/// @return Result::Ok(int) | Result::Err(String)
+fn process(input) {
+    let value = parse(input)?;   // may propagate Result::Err(String)
+    return Ok(value);
+}
+```
+
 ---
 
-## Skupiny funkcí
+## Function groups
 
-Při statické kontrole se rozlišují tři skupiny funkcí, podle toho, odkud je známý jejich návratový typ:
+Static checking distinguishes three groups of functions, based on where their return type is known from:
 
-1. **Kontraktovaná funkce** — funkce předaná do `validate_script` jako `function_name`. Kontrakt je u ní povinný; chybí-li doc-comment, vrací se `CheckerError::NoDocComment`.
-2. **Pomocné funkce** — ostatní `fn` definované uživatelem ve stejném skriptu. Anotace (`///`) jsou u nich dobrovolné — uživatel si je odekoruje sám, pokud chce, aby na ně checker mohl spoléhat při řešení volání z kontraktované funkce.
-3. **Vestavěné funkce** — nativní funkce dostupné uživatelskému skriptu (registrované v Rune `Context` hostitelským systémem), které nejsou napsané v Rune a doc-comment tedy nemají. Jejich signatury dodává hostitelský systém checkeru zvenčí, ne parsováním skriptu.
+1. **The contracted function** — the function passed to `validate_script` as `function_name`. Its contract is mandatory; if the doc-comment is missing, `CheckerError::NoDocComment` is returned.
+2. **Helper functions** — the other `fn`s defined by the user in the same script. Annotations (`///`) are optional for them — the user decorates them if they want the checker to be able to rely on them when resolving calls from the contracted function.
+3. **Builtin functions** — native functions available to the user script (registered in the Rune `Context` by the host system) that are not written in Rune and therefore have no doc-comment. Their signatures are supplied to the checker externally by the host system, not parsed from the script.
 
-Když `AstAnalyzer` narazí na návratovou hodnotu, která je přímým voláním funkce (`return helper(x)`, nebo pole objektu `code: helper()`), pokusí se název funkce dohledat ve **`SignatureRegistry`** (sloučení skupiny 2 a 3 — viz komponenta níže). Pokud je nalezen, návratový typ volané funkce je staticky znám a porovná se s kontraktem stejně jako u literálu. Pokud není nalezen (neanotovaná pomocná funkce), zůstává návratové místo `Dynamic`.
+When `AstAnalyzer` encounters a return value that is a direct function call (`return helper(x)`, or an object field `code: helper()`), it tries to look up the function name in the **`SignatureRegistry`** (the merge of groups 2 and 3 — see the component below). If found, the called function's return type is statically known and is compared against the contract just like a literal. If not found (an unannotated helper), the return site stays `Dynamic`.
 
-`Dynamic` ale není jen důsledek chybějící anotace — `AstAnalyzer` se o vyhledání v registru pokouší jen u přímého volání jménem. Lokální proměnná, nepřímé/computed volání, metoda na hodnotě nebo libovolný jiný výraz (operátor, field/index access) zůstávají `Dynamic` bez ohledu na to, jak důkladně jsou ostatní funkce anotované. Každý z těchto případů má svoji `DynamicReason` (viz `AstAnalyzer` níže) — v této verzi se s ní dál nic nedělá, ale je to připravený základ pro budoucí type inference, viz [`docs/future-type-inference.md`](./future-type-inference.md) a Omezení. V této verzi `Dynamic` znamená, že místo zůstává nepotvrzené (`unverifiable`), bez dalšího ověření.
+`Dynamic` is not only a consequence of a missing annotation, though — `AstAnalyzer` attempts the registry lookup only for a direct call by name. A local variable, an indirect/computed call, a method on a value, or any other expression stays `Dynamic` no matter how thoroughly the other functions are annotated. Each of these cases has its own `DynamicReason` (see `AstAnalyzer` below) — this version does nothing further with it, but it is groundwork for future type inference, see [`docs/future-type-inference.md`](./future-type-inference.md) and Limitations. In this version `Dynamic` means the site stays unconfirmed (`unverifiable`), with no further verification.
 
-**Verifikace pomocných funkcí:** narazí-li `AstAnalyzer` na `ResolvedCall` směřující na pomocnou funkci (skupina 2), checker ji **rekurzivně ověří** — stejným postupem (`AstAnalyzer` + `StaticChecker`) jako kontraktovanou funkci, proti jejímu vlastnímu deklarovanému `@return`. Výsledek se připojí k `ValidationReport` (viz níže) a porušený kontrakt pomocné funkce shodí i validaci té, která ji volá. Vestavěné funkce (skupina 3) takto ověřit nelze — nemají tělo napsané v Rune, takže se jejich dodaná signatura přijímá tak, jak je, bez verifikace.
+**Helper verification:** when `AstAnalyzer` encounters a `ResolvedCall` pointing at a helper function (group 2), the checker **recursively verifies** it — with the same procedure (`AstAnalyzer` + `StaticChecker`) as the contracted function, against its own declared `@return`. The result is attached to the `ValidationReport` (see below) and a broken helper contract fails the validation of the function that calls it too. Builtin functions (group 3) cannot be verified this way — they have no Rune body, so their supplied signature is accepted as-is, without verification.
 
-Aby (vzájemná) rekurze mezi pomocnými funkcemi neskončila v nekonečné smyčce, ověří se každá jmenovaná funkce v rámci jedné validace nejvýše jednou.
+To keep (mutual) recursion between helpers from ending in an infinite loop, each named function is verified at most once per validation.
 
-**Kolize jmen:** pokud stejné jméno existuje jako pomocná funkce ve skriptu i jako vestavěná funkce, má přednost definice ze skriptu.
+**Name collisions:** if the same name exists both as a script helper and as a builtin, the script definition wins.
 
-**Neplatná anotace pomocné funkce:** pokud pomocná funkce doc-comment má, ale jeho syntaxe je nevalidní, vrací se `CheckerError::InvalidContractSyntax` pro celou validaci (chyba se nepromlčuje). Chybějící doc-comment u pomocné funkce naopak není chyba — volání na ni zůstává `Dynamic`.
+**Invalid helper annotation:** if a helper has a doc-comment but its syntax is invalid, `CheckerError::InvalidContractSyntax` is returned for the whole validation (the error is not silenced). A missing helper doc-comment, on the other hand, is not an error — calls to it stay `Dynamic`.
 
 ---
 
-## Architektura
+## Architecture
 
 ```
-uživatelský skript (String)         vestavěné funkce (&[BuiltinSignature])
+user script (String)                builtin functions (&[BuiltinSignature])
         │                                          │
         ▼                                          │
 ┌───────────────────┐                               │
-│   DocCommentParser │  — extrahuje @param, @return ze všech fn ve skriptu
+│   DocCommentParser │  — extracts @param, @return from every fn in the script
 └────────┬──────────┘                               │
-         │  Contract (cílová fn) + Contract (pomocné fn)
+         │  Contract (target fn) + Contract (helper fns)
          ▼                                          │
 ┌────────────────────┐                              │
 │  SignatureRegistry │ <─────────────────────────────┘
-└────────┬───────────┘  — HashMap<String, TypeDef>: pomocné fn ze skriptu + vestavěné fn
+└────────┬───────────┘  — HashMap<String, TypeDef>: script helpers + builtins
          │
          ▼
 ┌───────────────────┐
-│    AstAnalyzer    │  — parsuje Rune AST, hledá return výrazy, volání dohledává v SignatureRegistry
+│    AstAnalyzer    │  — parses the Rune AST, finds return expressions, resolves calls in the SignatureRegistry
 └────────┬──────────┘
          │  Vec<ReturnSite>
          ▼
 ┌───────────────────┐
-│  StaticChecker    │  — porovná return sites (vč. ResolvedCall) s kontraktem
+│  StaticChecker    │  — compares return sites (incl. ResolvedCall) with the contract
 └────────┬──────────┘
          │  StaticCheckResult { verified, unverifiable, violations }
          ▼
@@ -162,18 +188,18 @@ uživatelský skript (String)         vestavěné funkce (&[BuiltinSignature])
   ScriptValidationReport { main, helpers, is_valid }
 ```
 
-Pro každý `ResolvedCall` na pomocnou funkci (`SignatureOrigin::Helper`) se `AstAnalyzer` → `StaticChecker` spustí znovu, tentokrát na těle této pomocné funkce — výsledný `ValidationReport` se uloží do `ScriptValidationReport.helpers`. Každá jmenovaná funkce se takto ověří nejvýš jednou (viz „Verifikace pomocných funkcí").
+For every `ResolvedCall` to a helper function (`SignatureOrigin::Helper`), `AstAnalyzer` → `StaticChecker` runs again, this time on the helper's body — the resulting `ValidationReport` is stored in `ScriptValidationReport.helpers`. Each named function is verified at most once this way (see "Helper verification").
 
 ---
 
-## Komponenty
+## Components
 
 ### 1. `DocCommentParser`
 
-Parsuje doc-comment string a vrátí strukturovaný kontrakt. Používá se pro kontraktovanou funkci i pro libovolnou pomocnou funkci ve skriptu.
+Parses a doc-comment string and returns a structured contract. Used for the contracted function as well as any helper function in the script.
 
-**Vstup:** `&str` — obsah doc-commentu
-**Výstup:** `Contract`
+**Input:** `&str` — the doc-comment content
+**Output:** `Contract`
 
 ```rust
 pub struct Contract {
@@ -209,59 +235,59 @@ pub struct EnumVariant {
 }
 ```
 
-`params` je v této verzi čistě deklarativní — popisuje typy parametrů, ale tělo funkce se vůči nim staticky netypuje (mimo rozsah; bez `RuntimeVerifier` se navíc nikde nepoužívají k odvození mock vstupů).
+In this version `params` is purely declarative — it describes the parameter types, but the function body is not statically typed against them (out of scope; without a `RuntimeVerifier` they are moreover not used anywhere to derive mock inputs).
 
-**Chování:**
+**Behavior:**
 
-- Ignoruje řádky bez `@` prefixu
-- Neznámé anotace ignoruje (forward compatibility)
-- Vrátí `Err(ParseError)` při nevalidní syntaxi typu
+- Ignores lines without an `@` prefix
+- Ignores unknown annotations (forward compatibility)
+- Returns `Err(ParseError)` on invalid type syntax
 
 ---
 
 ### 2. `SignatureRegistry`
 
-Slučuje znalost návratových typů pomocných a vestavěných funkcí (skupiny 2 a 3) do jedné tabulky, kterou pak používá `AstAnalyzer` k rozpoznání volání se staticky známým návratovým typem.
+Merges the knowledge of helper and builtin return types (groups 2 and 3) into a single table, which `AstAnalyzer` then uses to recognize calls with a statically known return type.
 
-**Vstup:**
-- zdrojový kód jako `&str` — nalezne se v něm každá `fn` (mimo kontraktovanou) s doc-commentem a ten se předá `DocCommentParser`
-- `&[BuiltinSignature]` — signatury vestavěných funkcí, dodané hostitelským systémem
+**Input:**
+- the source code as `&str` — every `fn` (except the contracted one) with a doc-comment is found in it and handed to `DocCommentParser`
+- `&[BuiltinSignature]` — builtin signatures supplied by the host system
 
-**Výstup:** `SignatureRegistry`
+**Output:** `SignatureRegistry`
 
 ```rust
 pub struct BuiltinSignature {
-    pub name: String,        // jak se funkce volá ve skriptu, např. "http::get"
+    pub name: String,        // how the function is called in the script, e.g. "http::get"
     pub return_type: TypeDef,
 }
 
 pub enum SignatureOrigin {
-    /// pomocná funkce ze skriptu — má tělo, bude rekurzivně ověřena při ResolvedCall
+    /// script helper — has a body, recursively verified on ResolvedCall
     Helper(TypeDef),
-    /// vestavěná funkce — bez těla, přijímá se tak, jak je dodaná
+    /// builtin — has no body, accepted as supplied
     Builtin(TypeDef),
 }
 
 pub struct SignatureRegistry {
-    pub signatures: HashMap<String, SignatureOrigin>,   // jméno funkce → původ + návratový typ
+    pub signatures: HashMap<String, SignatureOrigin>,   // function name → origin + return type
 }
 ```
 
-**Chování:**
+**Behavior:**
 
-- Pomocná funkce bez doc-commentu se do registru nezahrnuje (zůstává `Dynamic` při volání)
-- Pomocná funkce s nevalidním doc-commentem → `Err(InvalidContractSyntax)` pro celou validaci
-- Při kolizi jména mezi pomocnou a vestavěnou funkcí vyhrává pomocná (ze skriptu)
-- `SignatureOrigin` u každého záznamu signalizuje, jestli se má při `ResolvedCall` na danou funkci navíc rekurzivně spustit ověření jejího těla (`Helper`), nebo jen přijmout deklarovaný typ beze změny (`Builtin`) — viz „Verifikace pomocných funkcí" výše
+- A helper without a doc-comment is not included in the registry (calls to it stay `Dynamic`)
+- A helper with an invalid doc-comment → `Err(InvalidContractSyntax)` for the whole validation
+- On a name collision between a helper and a builtin, the helper (from the script) wins
+- The `SignatureOrigin` on each entry signals whether a `ResolvedCall` to that function should additionally trigger recursive verification of its body (`Helper`), or the declared type should just be accepted unchanged (`Builtin`) — see "Helper verification" above
 
 ---
 
 ### 3. `AstAnalyzer`
 
-Traversuje Rune AST a nalezne všechna místa kde funkce vrací hodnotu.
+Traverses the Rune AST and finds all sites where the function returns a value.
 
-**Vstup:** zdrojový kód jako `&str`, název funkce jako `&str`, `SignatureRegistry`
-**Výstup:** `Vec<ReturnSite>`
+**Input:** the source code as `&str`, the function name as `&str`, `SignatureRegistry`
+**Output:** `Vec<ReturnSite>`
 
 ```rust
 pub enum ReturnSite {
@@ -271,11 +297,11 @@ pub enum ReturnSite {
     PrimitiveLiteral(LiteralValue),
     /// return SomeEnum::Variant(value)
     EnumLiteral { path: Vec<String>, inner: Option<Box<LiteralValue>> },
-    /// return () nebo implicitní konec funkce
+    /// return () or the implicit end of the function
     Unit,
-    /// return helper(x) — jméno nalezeno v SignatureRegistry, návratový typ znám staticky
+    /// return helper(x) — name found in SignatureRegistry, return type statically known
     ResolvedCall { name: String, type_def: TypeDef },
-    /// nelze staticky určit — viz DynamicReason
+    /// cannot be determined statically — see DynamicReason
     Dynamic(DynamicReason),
 }
 
@@ -288,75 +314,76 @@ pub enum LiteralValue {
     Enum { path: Vec<String>, inner: Option<Box<LiteralValue>> },
     List(Vec<LiteralValue>),
     Unit,
-    /// pole objektu/seznamu je volání nalezené v SignatureRegistry
+    /// an object/list field is a call found in the SignatureRegistry
     ResolvedCall { name: String, type_def: TypeDef },
     Dynamic(DynamicReason),
 }
 
-/// Proč konkrétní výraz nešel staticky vyhodnotit. Sloužilo by jako rozhraní pro
-/// budoucí postupné rozšiřování o type inference (viz docs/future-type-inference.md) —
-/// každá varianta je samostatný, nezávisle dobyvatelný případ.
+/// Why a particular expression could not be evaluated statically. Serves as the
+/// interface for future incremental type-inference extensions (see
+/// docs/future-type-inference.md) — each variant is a separate, independently
+/// conquerable case.
 pub enum DynamicReason {
-    /// return x; — lokální proměnná, bez sledování dataflow
+    /// return x; — a local variable, no dataflow tracking
     Variable(String),
-    /// return helper(x); helper nenalezen v SignatureRegistry (bez kontraktu)
+    /// return helper(x); helper not found in the SignatureRegistry (no contract)
     UnannotatedCall(String),
-    /// return f(x); kde f je výraz/proměnná, ne přímo jméno funkce
+    /// return f(x); where f is an expression/variable, not a function name
     IndirectCall,
-    /// return value.compute(); — metoda na hodnotě
+    /// return value.compute(); — a method call on a value
     MethodCall(String),
-    /// operátor, field/index access, libovolný jiný výraz
+    /// an operator, field/index access, any other expression
     Expression,
 }
 ```
 
-**Chování:**
+**Behavior:**
 
-- Pokud funkce se zadaným názvem neexistuje → `Err(FunctionNotFound)`
-- Traversuje tělo funkce rekurzivně včetně vnořených bloků (if/match/loop)
-- Implicitní návrat (poslední výraz bez `;`) se také považuje za `ReturnSite`
-- Přímé volání funkce (`name(...)`) v návratové pozici nebo jako hodnota pole objektu/seznamu se nejprve hledá v `SignatureRegistry`; nalezení → `ResolvedCall`, jinak → `Dynamic(DynamicReason::UnannotatedCall(name))`
-- Ostatní tvary výrazů se klasifikují do příslušné `DynamicReason` varianty (viz výše) — i bez type inference to dává přesnější diagnostiku než plochý `Dynamic`
+- If no function with the given name exists → `Err(FunctionNotFound)`
+- Traverses the function body recursively including nested blocks (if/match/loop)
+- The implicit return (the last expression without `;`) also counts as a `ReturnSite`
+- A direct function call (`name(...)`) in return position, or as an object/list field value, is first looked up in the `SignatureRegistry`; found → `ResolvedCall`, otherwise → `Dynamic(DynamicReason::UnannotatedCall(name))`
+- Other expression shapes are classified into the appropriate `DynamicReason` variant (see above) — even without type inference this gives more precise diagnostics than a flat `Dynamic`
 
 ---
 
 ### 4. `StaticChecker`
 
-Porovná `Vec<ReturnSite>` z `AstAnalyzer` s `Contract` z `DocCommentParser`.
+Compares the `Vec<ReturnSite>` from `AstAnalyzer` with the `Contract` from `DocCommentParser`.
 
-**Výstup:**
+**Output:**
 
 ```rust
 pub struct StaticCheckResult {
-    /// Return sites které byly úspěšně ověřeny
+    /// Return sites that were successfully verified
     pub verified: Vec<ReturnSite>,
-    /// Return sites které jsou Dynamic — nelze staticky ověřit
+    /// Return sites that are Dynamic — cannot be verified statically
     pub unverifiable: Vec<ReturnSite>,
-    /// Return sites které NESPLŇUJÍ kontrakt
+    /// Return sites that VIOLATE the contract
     pub violations: Vec<Violation>,
 }
 
 pub struct Violation {
     pub site: ReturnSite,
     pub expected: TypeDef,
-    pub actual: String,   // popis co bylo nalezeno
+    pub actual: String,   // a description of what was found
 }
 ```
 
-**Pravidla:**
+**Rules:**
 
-- `Dynamic(_)` site → přesun do `unverifiable`, ne do `violations` (bez ohledu na konkrétní `DynamicReason`)
-- Object literal musí obsahovat **všechna** pole z kontraktu (extra pole jsou povolena)
-- Typy primitivů musí přesně odpovídat
-- Enum varianta musí být jednou z povolených variant v kontraktu
-- List: každý prvek literálu musí odpovídat vnitřnímu `TypeDef`; prázdný seznam (`[]`) je vždy platný
-- Object literal s polem, jehož hodnota je `LiteralValue::Dynamic(_)` (např. výsledek volání neanotované funkce): pokud žádné jiné statické pole nepřináší violation, celý return site jde do `unverifiable` (ne do `verified`, protože dynamické pole nelze potvrdit staticky). Pokud je naopak nějaké staticky známé pole špatného typu/chybí, jde o `violation` bez ohledu na přítomnost dynamických polí.
-- Enum varianta s více než jednou vnitřní hodnotou (`Variant(int, String)`) není v1 podporovaná — `EnumVariant.inner` i `LiteralValue::Enum.inner` počítají jen s 0 nebo 1 hodnotou. Víceparametrické varianty jsou known limitation (viz níže).
-- `ResolvedCall { type_def, .. }` (na úrovni return site i jako pole objektu/seznamu) se porovná stejnými strukturálními pravidly jako literál, ale `TypeDef` proti `TypeDef`: object musí obsahovat všechna pole kontraktu se slučitelným typem, primitiva musí být shodná, enum varianta musí být podmnožinou povolených variant, list/nullable rekurzivně podle vnitřního typu. Neshoda → `violation` se zprávou typu `Function 'helper' returns int, expected String`. Shoda → `verified`.
+- A `Dynamic(_)` site → goes to `unverifiable`, not `violations` (regardless of the specific `DynamicReason`)
+- An object literal must contain **all** fields from the contract (extra fields are allowed)
+- Primitive types must match exactly
+- An enum variant must be one of the variants allowed by the contract
+- List: every literal element must match the inner `TypeDef`; an empty list (`[]`) is always valid
+- An object literal with a field whose value is `LiteralValue::Dynamic(_)` (e.g. the result of an unannotated function call): if no other static field produces a violation, the whole return site goes to `unverifiable` (not `verified`, because the dynamic field cannot be confirmed statically). If, on the other hand, some statically known field has the wrong type/is missing, it is a `violation` regardless of the dynamic fields present.
+- An enum variant with more than one inner value (`Variant(int, String)`) is not supported in v1 — both `EnumVariant.inner` and `LiteralValue::Enum.inner` assume 0 or 1 values. Multi-parameter variants are a known limitation (see below).
+- `ResolvedCall { type_def, .. }` (at the return-site level or as an object/list field) is compared with the same structural rules as a literal, but `TypeDef` against `TypeDef`: the object must contain all contract fields with a compatible type, primitives must be identical, the enum variant must be a subset of the allowed variants, list/nullable recursively by the inner type. Mismatch → a `violation` with a message like `Function 'helper' returns int, expected String`. Match → `verified`.
 
 ---
 
-### 5. `ValidationReport` — výsledek validace jedné funkce
+### 5. `ValidationReport` — the result of validating one function
 
 ```rust
 pub struct ValidationReport {
@@ -367,35 +394,35 @@ pub struct ValidationReport {
 }
 ```
 
-`is_valid` je `true` pouze pokud `static_result.violations` je prázdné.
+`is_valid` is `true` only if `static_result.violations` is empty.
 
-Přítomnost `static_result.unverifiable` (Dynamic sites) `is_valid` **neovlivňuje** — v této verzi nemá checker jak je dál ověřit, takže se u nich kontrakt jen nepotvrdí, ale ani neporuší. Funkce s neprázdným `unverifiable` tedy může být `is_valid == true`; `ValidationReport` to zůstává transparentně vidět pro případné zobrazení uživateli.
+The presence of `static_result.unverifiable` (Dynamic sites) does **not** affect `is_valid` — in this version the checker has no way to verify them further, so the contract is merely unconfirmed for them, not violated. A function with a non-empty `unverifiable` can therefore be `is_valid == true`; the `ValidationReport` keeps this transparently visible for potential display to the user.
 
-Tento tvar je společný pro kontraktovanou funkci i pro každou pomocnou funkci, kterou checker rekurzivně ověřil (viz „Verifikace pomocných funkcí").
+This shape is shared by the contracted function and every helper the checker verified recursively (see "Helper verification").
 
-### 6. `ScriptValidationReport` — výsledek celé validace
+### 6. `ScriptValidationReport` — the result of the whole validation
 
 ```rust
 pub struct ScriptValidationReport {
-    /// Report kontraktované funkce (function_name z validate_script)
+    /// Report of the contracted function (function_name from validate_script)
     pub main: ValidationReport,
-    /// Reporty pomocných funkcí, na které se narazilo přes ResolvedCall a které se rekurzivně ověřily
+    /// Reports of the helpers encountered via ResolvedCall and verified recursively
     pub helpers: HashMap<String, ValidationReport>,
     pub is_valid: bool,
 }
 ```
 
-`is_valid` je `true` pouze pokud `main.is_valid` a zároveň všechny `helpers` mají `is_valid == true` — porušený kontrakt kdekoliv v řetězci volání shodí celou validaci.
+`is_valid` is `true` only if `main.is_valid` and all `helpers` have `is_valid == true` — a broken contract anywhere in the call chain fails the whole validation.
 
-Pomocná funkce, na kterou se z kontraktované funkce (přímo ani transitivně) nikdo neodkazuje, se neověřuje, i kdyby měla vlastní kontrakt — viz Omezení.
+A helper that nothing in the contracted function references (directly or transitively) is not verified, even if it has its own contract — see Limitations.
 
 ---
 
-## Veřejné API
+## Public API
 
 ```rust
-/// Hlavní entry point — validuje skript před uložením (staticky), vč. rekurzivní
-/// verifikace pomocných funkcí dosažených přes ResolvedCall
+/// Main entry point — validates a script before saving (statically), incl.
+/// recursive verification of helpers reached via ResolvedCall
 pub fn validate_script(
     source: &str,
     function_name: &str,
@@ -412,30 +439,30 @@ pub enum CheckerError {
 
 ---
 
-## Chybové hlášky pro uživatele
+## User-facing error messages
 
-Checker by měl produkovat srozumitelné chyby zobrazitelné uživateli:
+The checker should produce understandable errors displayable to the user:
 
-| Situace | Zpráva |
+| Situation | Message |
 |:---|:-------|
-| Funkce neexistuje | `Function 'process' not found in script` |
-| Chybí doc-comment | `Function 'process' has no contract doc-comment` |
-| Nevalidní syntaxe kontraktu | `Invalid @return type: unexpected token 'xyz'` |
-| Porušení kontraktu (staticky) | `Return value missing field 'status' (expected String)` |
-| Porušení kontraktu voláním jiné funkce | `Function 'helper' returns int, expected String` |
-| Pomocná funkce neplní svůj vlastní kontrakt | `Helper function 'helper' does not satisfy its own contract: return value missing field 'status'` |
+| Function does not exist | `Function 'process' not found in script` |
+| Missing doc-comment | `Function 'process' has no contract doc-comment` |
+| Invalid contract syntax | `Invalid @return type: unexpected token 'xyz'` |
+| Contract violation (static) | `Return value missing field 'status' (expected String)` |
+| Contract violation via another function | `Function 'helper' returns int, expected String` |
+| Helper does not satisfy its own contract | `Helper function 'helper' does not satisfy its own contract: return value missing field 'status'` |
 
 ---
 
-## Omezení a known limitations
+## Limitations and known limitations
 
-- **Dynamic return sites:** `Dynamic` nevzniká jen z chybějící anotace u volané funkce (`DynamicReason::UnannotatedCall`) — `AstAnalyzer` rozpoznává pouze literály a přímé volání jménem dohledatelné v `SignatureRegistry`. I se 100% anotačním pokrytím všech pomocných i vestavěných funkcí proto `Dynamic` zůstává u:
-  - **`DynamicReason::Variable`** — lokální proměnná (`let x = helper(); return x;`) — bez dataflow analýzy se nesleduje, čím byla `x` přiřazena, ani kdyby `helper` měl kontrakt
-  - **`DynamicReason::IndirectCall` / `MethodCall`** — nepřímé/computed volání (`let f = get_handler(); return f(x);`) nebo metoda na hodnotě (`return value.compute();`) — v AST není statické jméno k vyhledání v registru
-  - **`DynamicReason::Expression`** — libovolný jiný výraz, operátor, field/index access (`return a + b;`, `return input.name;`)
+- **Dynamic return sites:** `Dynamic` does not arise only from a missing annotation on the called function (`DynamicReason::UnannotatedCall`) — `AstAnalyzer` recognizes only literals and direct calls by a name resolvable in the `SignatureRegistry`. Even with 100% annotation coverage of all helpers and builtins, `Dynamic` therefore remains for:
+  - **`DynamicReason::Variable`** — a local variable (`let x = helper(); return x;`) — without dataflow analysis, what `x` was assigned is not tracked, even if `helper` had a contract
+  - **`DynamicReason::IndirectCall` / `MethodCall`** — an indirect/computed call (`let f = get_handler(); return f(x);`) or a method on a value (`return value.compute();`) — there is no static name in the AST to look up in the registry
+  - **`DynamicReason::Expression`** — any other expression, an operator, field/index access (`return a + b;`, `return input.name;`)
 
-  Takové návratové místo zůstává nepotvrzené (`unverifiable`) a v této verzi se dál neověřuje — `is_valid` na něj nereaguje (viz `ValidationReport`). Runtime verifikace mock vstupy, která by tuto mezeru zacelila, je odložena — viz [`docs/future-runtime-verifier.md`](./future-runtime-verifier.md). Statické zacelení (type inference) je rovněž odložené, ale `DynamicReason` je k tomu připravený základ — viz [`docs/future-type-inference.md`](./future-type-inference.md).
-- **Rune `Any` typ:** external typy registrované v Rune kontextu nejsou v kontraktu popsatelné přes primitivní typový systém — nutno rozšířit `TypeDef` o `Any(String)` s názvem typu.
-- **Enum varianty s více vnitřními hodnotami** (`Variant(int, String)`) nejsou v1 podporované — `inner` je vždy 0 nebo 1 hodnota.
-- **Deklarovaná signatura vestavěné funkce se nereverifikuje** (nemá tělo v Rune) — `SignatureRegistry` ji přijímá tak, jak ji dodal hostitelský systém. Pomocné funkce (skupina 2) se naopak rekurzivně ověřují, viz „Verifikace pomocných funkcí".
-- **Nepoužitá pomocná funkce se neověří:** pokud na pomocnou funkci s kontraktem nevede žádné `ResolvedCall` z kontraktované funkce (přímo ani transitivně přes jiné pomocné funkce), `validate_script` ji nezahrne do `ScriptValidationReport.helpers` a její tělo se nezkontroluje.
+  Such a return site stays unconfirmed (`unverifiable`) and is not verified further in this version — `is_valid` does not react to it (see `ValidationReport`). Runtime verification with mock inputs, which would close this gap, is deferred — see [`docs/future-runtime-verifier.md`](./future-runtime-verifier.md). The static closure (type inference) is deferred as well, but `DynamicReason` is groundwork prepared for it — see [`docs/future-type-inference.md`](./future-type-inference.md).
+- **The Rune `Any` type:** external types registered in the Rune context are not describable in the contract via the primitive type system — `TypeDef` would need extending with `Any(String)` carrying the type name.
+- **Enum variants with multiple inner values** (`Variant(int, String)`) are not supported in v1 — `inner` is always 0 or 1 values.
+- **A builtin's declared signature is not re-verified** (it has no Rune body) — the `SignatureRegistry` accepts it as supplied by the host system. Helpers (group 2) are, in contrast, verified recursively, see "Helper verification".
+- **An unused helper is not verified:** if no `ResolvedCall` from the contracted function (directly or transitively through other helpers) leads to a helper with a contract, `validate_script` does not include it in `ScriptValidationReport.helpers` and its body is not checked.
