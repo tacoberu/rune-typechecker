@@ -421,12 +421,17 @@ A helper that nothing in the contracted function references (directly or transit
 ## Public API
 
 ```rust
-/// Main entry point — validates a script before saving (statically), incl.
-/// recursive verification of helpers reached via ResolvedCall
+/// The single entry point — validates a script before saving (statically),
+/// incl. recursive verification of helpers reached via ResolvedCall and the
+/// method existence check (see docs/method-check.md).
+///
+/// `expected: None` skips the comparison with the host-expected signature;
+/// `&Environment::default()` = no builtins, no method table.
 pub fn validate_script(
     source: &str,
     function_name: &str,
-    builtins: &[BuiltinSignature],
+    expected: Option<&Contract>,
+    env: &Environment,
 ) -> Result<ScriptValidationReport, CheckerError>;
 
 pub enum CheckerError {
@@ -437,11 +442,11 @@ pub enum CheckerError {
 }
 ```
 
-Later additions (post-v0.1): `validate_script_against` compares the
-script's contract with the host-expected signature; the `_env` variants
-(`validate_script_env`, `validate_script_against_env`) take a full host
-[`Environment`] — builtins plus a method table for the method existence
-check, see [`docs/method-check.md`](./method-check.md).
+Historical note: in v0.1 the function took `(source, fn, builtins:
+&[BuiltinSignature])`; the signature comparison (`expected`) and the host
+[`Environment`] with the method table (see
+[`docs/method-check.md`](./method-check.md)) were folded in later, keeping
+the name.
 
 ---
 

@@ -23,9 +23,9 @@ What it checks
 - **Helpers with contracts, recursively** — a helper reached from the
   contracted function is verified against its own `@return`; a broken
   helper fails the whole script.
-- **The contract matches the host's expected signature**
-  (`validate_script_against`) — catches silent typos like `@paran` that
-  the doc-comment parser deliberately ignores.
+- **The contract matches the host's expected signature** (the `expected`
+  parameter) — catches silent typos like `@paran` that the doc-comment
+  parser deliberately ignores.
 - **Called instance methods exist** — rune dispatches
   `receiver.method(...)` dynamically, so a typo fails only at runtime;
   when the host describes its API in an `Environment`, the checker
@@ -39,7 +39,7 @@ Usage
 ```rust
 use rune_typechecker::{
 	Environment, MethodRegistry, contract, methods, std_methods,
-	validate_script_against_env,
+	validate_script,
 };
 
 let source = r#"
@@ -66,10 +66,12 @@ let env = Environment {
 	methods: MethodRegistry::new(table),
 };
 
-// What the host expects of the entry function.
+// What the host expects of the entry function. `None` would skip the
+// signature comparison; `&Environment::default()` an environment with no
+// builtins and no method table.
 let expected = contract!((sender: Sender) -> Status::Solved | Status::Continue);
 
-let report = validate_script_against_env(source, "handler", &expected, &env).unwrap();
+let report = validate_script(source, "handler", Some(&expected), &env).unwrap();
 assert!(!report.is_valid);
 for m in &report.contract_mismatches {
 	println!("{m}");

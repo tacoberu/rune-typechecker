@@ -3,7 +3,7 @@
 //! 2) a script that breaks the contract directly (the README motivation),
 //! 3) a script where only the called helper breaks the contract.
 
-use rune_typechecker::{BuiltinSignature, PrimitiveType, TypeDef, validate_script};
+use rune_typechecker::{BuiltinSignature, Environment, PrimitiveType, TypeDef, validate_script};
 
 fn main() {
 	honest_script_with_helper();
@@ -30,7 +30,7 @@ fn honest_script_with_helper() {
         }
     "#;
 
-	let report = validate_script(source, "greeting", &[]).expect("validate_script failed");
+	let report = validate_script(source, "greeting", None, &Environment::default()).expect("validation failed");
 
 	println!("is_valid = {}", report.is_valid);
 	println!(
@@ -55,7 +55,7 @@ fn broken_contract() {
         }
     "#;
 
-	let report = validate_script(source, "process", &[]).expect("validate_script failed");
+	let report = validate_script(source, "process", None, &Environment::default()).expect("validation failed");
 
 	println!("is_valid = {}", report.is_valid);
 	for violation in &report.main.static_result.violations {
@@ -79,7 +79,7 @@ fn helper_breaks_its_own_contract() {
         }
     "#;
 
-	let report = validate_script(source, "process", &[]).expect("validate_script failed");
+	let report = validate_script(source, "process", None, &Environment::default()).expect("validation failed");
 
 	println!("is_valid = {} (whole script)", report.is_valid);
 	println!(
@@ -104,12 +104,15 @@ fn trusted_builtin() {
         }
     "#;
 
-	let builtins = vec![BuiltinSignature {
-		name: "http::get".to_string(),
-		return_type: TypeDef::Primitive(PrimitiveType::String),
-	}];
+	let env = Environment {
+		builtins: vec![BuiltinSignature {
+			name: "http::get".to_string(),
+			return_type: TypeDef::Primitive(PrimitiveType::String),
+		}],
+		..Environment::default()
+	};
 
-	let report = validate_script(source, "fetch_title", &builtins).expect("validate_script failed");
+	let report = validate_script(source, "fetch_title", None, &env).expect("validation failed");
 
 	println!("is_valid = {}", report.is_valid);
 	println!(
@@ -135,8 +138,8 @@ fn handler(sender, event, context) {
 
 	"#;
 
-	//~ let report = validate_script(source, "fetch_title", &builtins).expect("validate_script failed");
-	let report = validate_script(source, "handler", &[]).expect("validate_script failed");
+	//~ let report = validate_script(source, "fetch_title", None, &env).expect("validation failed");
+	let report = validate_script(source, "handler", None, &Environment::default()).expect("validation failed");
 
 	println!("is_valid = {}", report.is_valid);
 	println!(

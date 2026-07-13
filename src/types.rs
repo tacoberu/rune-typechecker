@@ -373,7 +373,8 @@ pub struct ValidationReport {
 }
 
 /// Mismatch between the contract declared by the script and the signature
-/// the host system expects of the function (see `validate_script_against`).
+/// the host system expects of the function (the `expected` parameter of
+/// `validate_script`).
 #[derive(Debug, Clone, PartialEq)]
 pub enum ContractMismatch {
 	/// The script declares a different number of parameters than the host expects.
@@ -418,8 +419,8 @@ impl std::fmt::Display for ContractMismatch {
 pub struct ScriptValidationReport {
 	pub main: ValidationReport,
 	pub helpers: HashMap<String, ValidationReport>,
-	/// Mismatches against the host-expected signature — filled only by
-	/// `validate_script_against`; `validate_script` leaves it empty.
+	/// Mismatches against the host-expected signature — filled only when
+	/// `validate_script` gets `expected: Some(..)`.
 	pub contract_mismatches: Vec<ContractMismatch>,
 	pub is_valid: bool,
 }

@@ -16,7 +16,7 @@
 
 use rune_typechecker::{
 	Environment, MethodRegistry, ScriptValidationReport, contract, methods, std_methods,
-	validate_script_against_env,
+	validate_script,
 };
 
 /// The host describes what its rune context makes available to scripts.
@@ -81,7 +81,7 @@ fn missing_method_on_host_type(expected: &rune_typechecker::Contract, env: &Envi
         }
     "#;
 
-	let report = validate_script_against_env(source, "handler", expected, env)
+	let report = validate_script(source, "handler", Some(expected), env)
 		.expect("validation failed");
 	print_report(&report);
 	println!();
@@ -100,7 +100,7 @@ fn typo_in_chained_std_method(expected: &rune_typechecker::Contract, env: &Envir
         }
     "#;
 
-	let report = validate_script_against_env(source, "handler", expected, env)
+	let report = validate_script(source, "handler", Some(expected), env)
 		.expect("validation failed");
 	print_report(&report);
 	println!();
@@ -123,7 +123,7 @@ fn unwrapped_binding_is_tracked(expected: &rune_typechecker::Contract, env: &Env
         }
     "#;
 
-	let report = validate_script_against_env(source, "handler", expected, env)
+	let report = validate_script(source, "handler", Some(expected), env)
 		.expect("validation failed");
 	print_report(&report);
 	println!();
@@ -143,7 +143,7 @@ fn unknown_receiver_is_skipped(expected: &rune_typechecker::Contract, env: &Envi
         }
     "#;
 
-	let report = validate_script_against_env(source, "handler", expected, env)
+	let report = validate_script(source, "handler", Some(expected), env)
 		.expect("validation failed");
 	print_report(&report);
 }

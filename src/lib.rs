@@ -24,26 +24,25 @@ pub use types::{
 	StaticCheckResult, TypeDef, ValidationReport, Violation,
 };
 
-/// Main entry point — validates a script before saving (statically),
-/// including recursive verification of helpers reached via `ResolvedCall`.
+/// Main entry point — validates a script before saving (statically).
+///
+/// Verifies that the checked function (and, recursively, helpers reached via
+/// `ResolvedCall`) honors its declared doc-comment contract, checks the
+/// existence of called instance methods against the host [`Environment`],
+/// and — when `expected` is given — compares the declared contract with the
+/// signature the host expects of the function (mismatches end up in
+/// `report.contract_mismatches`). The signature comparison also catches the
+/// case where a typo (`@paran`) makes the script declare no parameters at
+/// all — the contract itself is then consistent, but it diverges from the
+/// expected signature.
+///
+/// Defaults for the simpler uses: `expected: None` skips the host-signature
+/// comparison, `&Environment::default()` means no builtins and no method
+/// table (method calls are then not checked).
 pub fn validate_script(
 	source: &str,
 	function_name: &str,
-	builtins: &[BuiltinSignature],
-) -> Result<ScriptValidationReport, CheckerError> {
-	let env = Environment {
-		builtins: builtins.to_vec(),
-		..Environment::default()
-	};
-	validate_script_env(source, function_name, &env)
-}
-
-/// Like [`validate_script`], but with the full host [`Environment`] —
-/// including the method table used to statically check the existence of
-/// instance method calls (`receiver.method(...)`).
-pub fn validate_script_env(
-	source: &str,
-	function_name: &str,
+	expected: Option<&Contract>,
 	env: &Environment,
 ) -> Result<ScriptValidationReport, CheckerError> {
 	let file = ast_analyzer::parse_file(source)?;
@@ -53,50 +52,20 @@ pub fn validate_script_env(
 
 	let main = validate_function(&file, source, function_name, env, &mut helpers, &mut visited)?;
 
-	let is_valid = main.is_valid && helpers.values().all(|r| r.is_valid);
+	let contract_mismatches = match expected {
+		Some(expected) => compare_contracts(expected, &main.contract),
+		None => Vec::new(),
+	};
+	let is_valid = main.is_valid
+		&& helpers.values().all(|r| r.is_valid)
+		&& contract_mismatches.is_empty();
 
 	Ok(ScriptValidationReport {
 		main,
 		helpers,
-		contract_mismatches: Vec::new(),
+		contract_mismatches,
 		is_valid,
 	})
-}
-
-/// Like [`validate_script`], but additionally verifies that the contract
-/// declared by the script matches the signature the host system expects of
-/// the function. Mismatches end up in `report.contract_mismatches` and drop
-/// `report.is_valid`.
-///
-/// This also catches the case where a typo (`@paran`) makes the script
-/// declare no parameters at all — the contract itself is then consistent and
-/// `validate_script` lets it through, but it diverges from the expected
-/// signature.
-pub fn validate_script_against(
-	source: &str,
-	function_name: &str,
-	expected: &Contract,
-	builtins: &[BuiltinSignature],
-) -> Result<ScriptValidationReport, CheckerError> {
-	let env = Environment {
-		builtins: builtins.to_vec(),
-		..Environment::default()
-	};
-	validate_script_against_env(source, function_name, expected, &env)
-}
-
-/// Like [`validate_script_against`], but with the full host [`Environment`]
-/// (see [`validate_script_env`]).
-pub fn validate_script_against_env(
-	source: &str,
-	function_name: &str,
-	expected: &Contract,
-	env: &Environment,
-) -> Result<ScriptValidationReport, CheckerError> {
-	let mut report = validate_script_env(source, function_name, env)?;
-	report.contract_mismatches = compare_contracts(expected, &report.main.contract);
-	report.is_valid = report.is_valid && report.contract_mismatches.is_empty();
-	Ok(report)
 }
 
 fn compare_contracts(expected: &Contract, actual: &Contract) -> Vec<ContractMismatch> {
@@ -244,7 +213,7 @@ mod tests {
                 return "ok";
             }
         "#;
-		let report = validate_script(source, "process", &[]).unwrap();
+		let report = validate_script(source, "process", None, &Environment::default()).unwrap();
 		assert!(report.is_valid);
 		assert!(report.main.static_result.violations.is_empty());
 		assert!(report.helpers.is_empty());
@@ -259,7 +228,7 @@ mod tests {
                 return "ok";
             }
         "#;
-		let report = validate_script(source, "process", &[]).unwrap();
+		let report = validate_script(source, "process", None, &Environment::default()).unwrap();
 		assert!(report.is_valid);
 	}
 
@@ -274,7 +243,7 @@ mod tests {
                 return "ok";
             }
         "#;
-		let report = validate_script(source, "process", &[]).unwrap();
+		let report = validate_script(source, "process", None, &Environment::default()).unwrap();
 		assert!(report.is_valid);
 		assert_eq!(report.main.contract.params.len(), 1);
 	}
@@ -290,7 +259,7 @@ mod tests {
             }
         "#;
 		let expected = contract!((sender: String, event: String) -> Status::Solved);
-		let report = validate_script_against(source, "handler", &expected, &[]).unwrap();
+		let report = validate_script(source, "handler", Some(&expected), &Environment::default()).unwrap();
 		assert!(report.is_valid);
 		assert!(report.contract_mismatches.is_empty());
 	}
@@ -307,7 +276,7 @@ mod tests {
             }
         "#;
 		let expected = contract!((sender: String, event: String) -> Status::Solved);
-		let report = validate_script_against(source, "handler", &expected, &[]).unwrap();
+		let report = validate_script(source, "handler", Some(&expected), &Environment::default()).unwrap();
 		assert!(report.is_valid);
 		assert!(report.contract_mismatches.is_empty());
 	}
@@ -324,7 +293,7 @@ mod tests {
             }
         "#;
 		let expected = contract!((sender: String) -> Status::Solved);
-		let report = validate_script_against(source, "handler", &expected, &[]).unwrap();
+		let report = validate_script(source, "handler", Some(&expected), &Environment::default()).unwrap();
 		assert!(!report.is_valid);
 		assert!(report.main.is_valid);
 		assert_eq!(
@@ -346,7 +315,7 @@ mod tests {
             }
         "#;
 		let expected = contract!((sender: String) -> Status::Solved);
-		let report = validate_script_against(source, "handler", &expected, &[]).unwrap();
+		let report = validate_script(source, "handler", Some(&expected), &Environment::default()).unwrap();
 		assert!(!report.is_valid);
 		assert_eq!(report.contract_mismatches.len(), 2);
 		assert!(matches!(
@@ -374,7 +343,7 @@ mod tests {
 			(sender: Sender, event: EventType, context: AppContext | WindowContext | ComponentContext)
 				-> Status::Solved | Status::Continue | Status::Quit
 		);
-		let report = validate_script_against(source, "handler", &expected, &[]).unwrap();
+		let report = validate_script(source, "handler", Some(&expected), &Environment::default()).unwrap();
 		let messages: Vec<String> = report
 			.contract_mismatches
 			.iter()
@@ -405,7 +374,7 @@ mod tests {
 			(sender: Sender, event: EventType, context: AppContext | WindowContext | ComponentContext)
 				-> Status::Solved | Status::Continue | Status::Quit
 		);
-		let report = validate_script_against(source, "handler", &expected, &[]).unwrap();
+		let report = validate_script(source, "handler", Some(&expected), &Environment::default()).unwrap();
 		assert!(report.contract_mismatches.is_empty());
 		assert!(report.is_valid);
 	}
@@ -419,7 +388,7 @@ mod tests {
             }
         "#;
 		let expected = contract!(() -> Status);
-		let report = validate_script_against(source, "handler", &expected, &[]).unwrap();
+		let report = validate_script(source, "handler", Some(&expected), &Environment::default()).unwrap();
 		assert!(report.contract_mismatches.is_empty());
 		assert!(report.is_valid);
 	}
@@ -433,7 +402,7 @@ mod tests {
             }
         "#;
 		let expected = contract!(() -> Status::Solved | Status::Continue);
-		let report = validate_script_against(source, "handler", &expected, &[]).unwrap();
+		let report = validate_script(source, "handler", Some(&expected), &Environment::default()).unwrap();
 		assert!(!report.is_valid);
 		assert_eq!(report.contract_mismatches.len(), 1);
 		assert!(matches!(
@@ -461,7 +430,7 @@ mod tests {
                 return Ok(42);
             }
         "#;
-		let report = validate_script(source, "process", &[]).unwrap();
+		let report = validate_script(source, "process", None, &Environment::default()).unwrap();
 		assert!(report.is_valid);
 		// `parse` is a helper reached via `?` — recursively verified.
 		assert!(report.helpers.contains_key("parse"));
@@ -484,7 +453,7 @@ mod tests {
                 return Ok(42);
             }
         "#;
-		let report = validate_script(source, "process", &[]).unwrap();
+		let report = validate_script(source, "process", None, &Environment::default()).unwrap();
 		assert!(!report.is_valid);
 		assert_eq!(report.main.static_result.violations.len(), 1);
 		assert!(
@@ -506,7 +475,7 @@ mod tests {
                 return 1;
             }
         "#;
-		let report = validate_script(source, "process", &[]).unwrap();
+		let report = validate_script(source, "process", None, &Environment::default()).unwrap();
 		assert!(!report.is_valid);
 		assert_eq!(report.main.static_result.violations.len(), 1);
 		assert!(matches!(
@@ -527,7 +496,7 @@ mod tests {
                 return Ok(1);
             }
         "#;
-		let report = validate_script(source, "process", &[]).unwrap();
+		let report = validate_script(source, "process", None, &Environment::default()).unwrap();
 		assert!(report.is_valid);
 		assert!(
 			report
@@ -550,7 +519,7 @@ mod tests {
                 return Ok(value);
             }
         "#;
-		let report = validate_script(source, "process", &[]).unwrap();
+		let report = validate_script(source, "process", None, &Environment::default()).unwrap();
 		assert!(report.is_valid);
 		assert!(
 			report
@@ -573,7 +542,7 @@ mod tests {
                 return Ok(42);
             }
         "#;
-		let report = validate_script(source, "process", &[]).unwrap();
+		let report = validate_script(source, "process", None, &Environment::default()).unwrap();
 		assert!(report.is_valid);
 		assert!(
 			report
@@ -597,7 +566,7 @@ mod tests {
                 return Some(1);
             }
         "#;
-		let report = validate_script(source, "process", &[]).unwrap();
+		let report = validate_script(source, "process", None, &Environment::default()).unwrap();
 		assert!(report.is_valid);
 		assert!(report.main.static_result.unverifiable.is_empty());
 	}
@@ -612,7 +581,7 @@ mod tests {
                 return Ok(1);
             }
         "#;
-		let report = validate_script(source, "process", &[]).unwrap();
+		let report = validate_script(source, "process", None, &Environment::default()).unwrap();
 		assert!(!report.is_valid);
 		assert_eq!(report.main.static_result.violations.len(), 1);
 		assert!(
@@ -637,7 +606,7 @@ mod tests {
                 return Ok(42);
             }
         "#;
-		let report = validate_script(source, "process", &[]).unwrap();
+		let report = validate_script(source, "process", None, &Environment::default()).unwrap();
 		assert!(report.is_valid);
 		// Both the tail `Ok(int)` and the propagated `Err(String)` are statically verified.
 		assert!(report.main.static_result.unverifiable.is_empty());
@@ -716,7 +685,7 @@ mod tests {
                 return 42;
             }
         "#;
-		let report = validate_script(source, "process", &[]).unwrap();
+		let report = validate_script(source, "process", None, &Environment::default()).unwrap();
 		assert!(!report.is_valid);
 		assert_eq!(report.main.static_result.violations.len(), 1);
 		assert_eq!(
@@ -733,7 +702,7 @@ mod tests {
                 return #{ status: "ok", code: 42, active: true };
             }
         "#;
-		let report = validate_script(source, "process", &[]).unwrap();
+		let report = validate_script(source, "process", None, &Environment::default()).unwrap();
 		assert!(report.is_valid);
 	}
 
@@ -750,7 +719,7 @@ mod tests {
                 return helper();
             }
         "#;
-		let report = validate_script(source, "process", &[]).unwrap();
+		let report = validate_script(source, "process", None, &Environment::default()).unwrap();
 		assert!(report.is_valid);
 		assert!(report.helpers.contains_key("helper"));
 		assert!(report.helpers["helper"].is_valid);
@@ -769,7 +738,7 @@ mod tests {
                 return helper();
             }
         "#;
-		let report = validate_script(source, "process", &[]).unwrap();
+		let report = validate_script(source, "process", None, &Environment::default()).unwrap();
 		// The caller expects int and the helper declares int, so the
 		// ResolvedCall itself is verified at the `process` level...
 		assert!(report.main.is_valid);
@@ -786,11 +755,14 @@ mod tests {
                 return http::get("https://example.com");
             }
         "#;
-		let builtins = vec![BuiltinSignature {
-			name: "http::get".to_string(),
-			return_type: TypeDef::Primitive(PrimitiveType::String),
-		}];
-		let report = validate_script(source, "process", &builtins).unwrap();
+		let env = Environment {
+			builtins: vec![BuiltinSignature {
+				name: "http::get".to_string(),
+				return_type: TypeDef::Primitive(PrimitiveType::String),
+			}],
+			..Environment::default()
+		};
+		let report = validate_script(source, "process", None, &env).unwrap();
 		assert!(report.is_valid);
 		assert!(report.helpers.is_empty());
 	}
@@ -798,7 +770,7 @@ mod tests {
 	#[test]
 	fn function_not_found_is_error() {
 		let source = "fn other() { return 1; }";
-		let result = validate_script(source, "process", &[]);
+		let result = validate_script(source, "process", None, &Environment::default());
 		assert_eq!(
 			result.unwrap_err(),
 			CheckerError::FunctionNotFound("process".to_string())
@@ -808,7 +780,7 @@ mod tests {
 	#[test]
 	fn missing_doc_comment_is_error() {
 		let source = "fn process() { return 1; }";
-		let result = validate_script(source, "process", &[]);
+		let result = validate_script(source, "process", None, &Environment::default());
 		assert_eq!(result.unwrap_err(), CheckerError::NoDocComment);
 	}
 
@@ -820,7 +792,7 @@ mod tests {
                 return compute(input);
             }
         "#;
-		let report = validate_script(source, "process", &[]).unwrap();
+		let report = validate_script(source, "process", None, &Environment::default()).unwrap();
 		assert!(report.is_valid);
 		assert_eq!(report.main.static_result.unverifiable.len(), 1);
 	}

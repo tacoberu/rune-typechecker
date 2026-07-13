@@ -1,13 +1,15 @@
 //! The host system typically knows what signature it expects of the
 //! validated function (how many parameters, what types, what return type).
-//! `validate_script`, however, only verifies that the script honors *its own*
-//! declared contract — it knows nothing about the host's expectation.
+//! With `expected: None`, `validate_script` only verifies that
+//! the script honors *its own* declared contract — it knows nothing about
+//! the host's expectation.
 //!
-//! `validate_script_against` additionally compares the script's contract with
-//! the expected signature: mismatches end up in `report.contract_mismatches`
-//! and drop `report.is_valid`. This also catches a silent typo like `@paran`,
-//! which the doc-comment parser deliberately ignores (forward compatibility),
-//! so the validation itself passes.
+//! Passing `Some(&expected)` additionally compares the script's contract
+//! with the expected signature: mismatches end up in
+//! `report.contract_mismatches` and drop `report.is_valid`. This also
+//! catches a silent typo like `@paran`, which the doc-comment parser
+//! deliberately ignores (forward compatibility), so the validation itself
+//! passes.
 //!
 //! The expected signature is written concisely with the `contract!` macro;
 //! the type syntax is the same as in doc-comment contracts. For signatures
@@ -17,7 +19,7 @@
 //! Parameter names are not compared — the script names them as it likes,
 //! only the types at each position matter.
 
-use rune_typechecker::{Contract, ScriptValidationReport, contract, validate_script_against};
+use rune_typechecker::{Contract, Environment, ScriptValidationReport, contract, validate_script};
 
 fn main() {
 	let expected = contract!(
@@ -54,7 +56,7 @@ fn matching_contract(expected: &Contract) {
     "#;
 
 	let report =
-		validate_script_against(source, "handler", expected, &[]).expect("validation failed");
+		validate_script(source, "handler", Some(expected), &Environment::default()).expect("validation failed");
 	print_report(&report);
 	println!();
 }
@@ -73,7 +75,7 @@ fn typo_in_param_tag(expected: &Contract) {
     "#;
 
 	let report =
-		validate_script_against(source, "handler", expected, &[]).expect("validation failed");
+		validate_script(source, "handler", Some(expected), &Environment::default()).expect("validation failed");
 	print_report(&report);
 	println!();
 }
@@ -92,6 +94,6 @@ fn wrong_param_type(expected: &Contract) {
     "#;
 
 	let report =
-		validate_script_against(source, "handler", expected, &[]).expect("validation failed");
+		validate_script(source, "handler", Some(expected), &Environment::default()).expect("validation failed");
 	print_report(&report);
 }

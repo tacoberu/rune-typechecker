@@ -60,7 +60,7 @@ member has it, the call may be valid and stays silent.
 ```rust
 use rune_typechecker::{
 	Environment, MethodRegistry, contract, methods,
-	std_methods, validate_script_against_env,
+	std_methods, validate_script,
 };
 
 // Standard library — pick exactly the modules the host installs into its
@@ -85,7 +85,7 @@ let env = Environment {
 };
 
 let expected = contract!((sender: Sender, context: AppContext) -> Status::Solved);
-let report = validate_script_against_env(source, "handler", &expected, &env)?;
+let report = validate_script(source, "handler", Some(&expected), &env)?;
 for v in &report.main.method_violations {
 	println!("{v}");   // unknown method `does_not_exist` on `Sender` (line 6)
 }
