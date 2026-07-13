@@ -176,6 +176,91 @@ pub struct BuiltinSignature {
 	pub return_type: TypeDef,
 }
 
+/// An instance method the host makes available on a named receiver type
+/// (e.g. `Sender::fullname` in a rune context).
+#[derive(Debug, Clone, PartialEq)]
+pub struct MethodSignature {
+	/// Receiver type name as it appears in contracts (`Sender`, `String`, …).
+	pub receiver: String,
+	pub name: String,
+	/// Return type for chained inference; `None` = exists, type unknown.
+	pub return_type: Option<TypeDef>,
+}
+
+impl MethodSignature {
+	pub fn new(receiver: &str, name: &str, return_type: Option<TypeDef>) -> Self {
+		Self {
+			receiver: receiver.to_string(),
+			name: name.to_string(),
+			return_type,
+		}
+	}
+}
+
+/// Method table: receiver type -> method name -> return type. A method call
+/// is checked only when the receiver type is present here — types the host
+/// did not describe are skipped (no false positives).
+#[derive(Debug, Clone, Default)]
+pub struct MethodRegistry {
+	map: HashMap<String, HashMap<String, Option<TypeDef>>>,
+}
+
+impl MethodRegistry {
+	pub fn new(signatures: impl IntoIterator<Item = MethodSignature>) -> Self {
+		let mut map: HashMap<String, HashMap<String, Option<TypeDef>>> = HashMap::new();
+		for sig in signatures {
+			map.entry(sig.receiver)
+				.or_default()
+				.insert(sig.name, sig.return_type);
+		}
+		Self { map }
+	}
+
+	pub fn is_empty(&self) -> bool {
+		self.map.is_empty()
+	}
+
+	/// Whether the receiver type is described at all.
+	pub fn has_type(&self, receiver: &str) -> bool {
+		self.map.contains_key(receiver)
+	}
+
+	/// `Some(return_type)` when the method exists on the receiver;
+	/// `None` when it does not (or the type is unknown — guard with [`has_type`]).
+	pub fn lookup(&self, receiver: &str, method: &str) -> Option<&Option<TypeDef>> {
+		self.map.get(receiver)?.get(method)
+	}
+}
+
+/// A method call on a receiver whose type is statically known, but the
+/// method does not exist on it — it would fail at runtime with
+/// "missing instance function".
+#[derive(Debug, Clone, PartialEq)]
+pub struct MethodViolation {
+	/// Receiver type(s) the method is missing on (`Sender`, `String`, …).
+	pub receiver: String,
+	pub method: String,
+	pub line: usize,
+}
+
+impl std::fmt::Display for MethodViolation {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		write!(
+			f,
+			"unknown method `{}` on `{}` (line {})",
+			self.method, self.receiver, self.line
+		)
+	}
+}
+
+/// Everything the host system provides to scripts beyond the contracts —
+/// free functions (`builtins`) and instance methods on host types.
+#[derive(Debug, Clone, Default)]
+pub struct Environment {
+	pub builtins: Vec<BuiltinSignature>,
+	pub methods: MethodRegistry,
+}
+
 /// Origin of a return type in the `SignatureRegistry`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SignatureOrigin {
@@ -281,6 +366,9 @@ pub struct ValidationReport {
 	pub function_name: String,
 	pub contract: Contract,
 	pub static_result: StaticCheckResult,
+	/// Calls of methods that do not exist on their (statically known)
+	/// receiver type — see [`MethodRegistry`].
+	pub method_violations: Vec<MethodViolation>,
 	pub is_valid: bool,
 }
 

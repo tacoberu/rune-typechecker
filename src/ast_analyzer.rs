@@ -387,7 +387,7 @@ fn try_error_variants(variants: &[EnumVariant]) -> Vec<EnumVariant> {
 
 /// The type `expr?` evaluates to when it does not propagate — the inner value
 /// of `Result::Ok`/`Option::Some`. `None` = cannot be determined statically.
-fn try_success_type(variants: &[EnumVariant]) -> Option<TypeDef> {
+pub(crate) fn try_success_type(variants: &[EnumVariant]) -> Option<TypeDef> {
 	let success = variants
 		.iter()
 		.find(|v| matches!(v.path.last().map(String::as_str), Some("Ok") | Some("Some")))?;
@@ -631,7 +631,7 @@ fn canonical_builtin_variant(segments: &[String]) -> Option<Vec<String>> {
 
 /// Splits a `Path` into text segments when it consists purely of identifiers
 /// (no `Self`/`super`/`crate`/generics) with no leading/trailing `::`.
-fn path_segments(path: &ast::Path, source: &str) -> Option<Vec<String>> {
+pub(crate) fn path_segments(path: &ast::Path, source: &str) -> Option<Vec<String>> {
 	if path.global.is_some() || path.trailing.is_some() {
 		return None;
 	}

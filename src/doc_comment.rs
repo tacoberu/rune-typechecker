@@ -62,6 +62,21 @@ impl Contract {
 	}
 }
 
+impl TypeDef {
+	/// Parses a single type in the contract notation (`String`,
+	/// `Option::Some(ComponentContext) | Option::None`, `[{ name: String }]`, …).
+	/// Meant for hosts describing method return types ([`crate::MethodSignature`]).
+	pub fn parse(input: &str) -> Result<TypeDef, CheckerError> {
+		let (type_def, rest) = parse_type(input.trim_start())?;
+		if !rest.trim().is_empty() {
+			return Err(err(format!(
+				"unexpected trailing tokens after type: '{rest}'"
+			)));
+		}
+		Ok(type_def)
+	}
+}
+
 fn parse_signature(signature: &str) -> Result<Contract, CheckerError> {
 	let rest = signature.trim_start();
 	let rest = rest

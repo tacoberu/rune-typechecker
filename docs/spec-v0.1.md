@@ -4,7 +4,7 @@
 
 A system for static verification of user-written Rune scripts before they are saved. The user declares a contract using doc-comment annotations above a function. The checker verifies that the implementation satisfies the contract wherever that is statically possible.
 
-Runtime verification with mock inputs (running the function in a sandbox) is out of scope in this version — see [`docs/future-runtime-verifier.md`](./future-runtime-verifier.md). Type inference (variable tracking, expression typing) is out of scope as well — `AstAnalyzer` is however designed so that this extension can be added incrementally, see [`docs/future-type-inference.md`](./future-type-inference.md).
+Runtime verification with mock inputs (running the function in a sandbox) is out of scope in this version — see [`docs/future-runtime-verifier.md`](./future-runtime-verifier.md). Type inference (variable tracking, expression typing) is out of scope for **return-site verification** — `AstAnalyzer` is however designed so that this extension can be added incrementally, see [`docs/future-type-inference.md`](./future-type-inference.md). A limited form of it already powers the separate **method existence check** (`receiver.method(...)` on statically known types) — see [`docs/method-check.md`](./method-check.md).
 
 ---
 
@@ -437,6 +437,12 @@ pub enum CheckerError {
 }
 ```
 
+Later additions (post-v0.1): `validate_script_against` compares the
+script's contract with the host-expected signature; the `_env` variants
+(`validate_script_env`, `validate_script_against_env`) take a full host
+[`Environment`] — builtins plus a method table for the method existence
+check, see [`docs/method-check.md`](./method-check.md).
+
 ---
 
 ## User-facing error messages
@@ -458,7 +464,7 @@ The checker should produce understandable errors displayable to the user:
 
 - **Dynamic return sites:** `Dynamic` does not arise only from a missing annotation on the called function (`DynamicReason::UnannotatedCall`) — `AstAnalyzer` recognizes only literals and direct calls by a name resolvable in the `SignatureRegistry`. Even with 100% annotation coverage of all helpers and builtins, `Dynamic` therefore remains for:
   - **`DynamicReason::Variable`** — a local variable (`let x = helper(); return x;`) — without dataflow analysis, what `x` was assigned is not tracked, even if `helper` had a contract
-  - **`DynamicReason::IndirectCall` / `MethodCall`** — an indirect/computed call (`let f = get_handler(); return f(x);`) or a method on a value (`return value.compute();`) — there is no static name in the AST to look up in the registry
+  - **`DynamicReason::IndirectCall` / `MethodCall`** — an indirect/computed call (`let f = get_handler(); return f(x);`) or a method on a value (`return value.compute();`) — there is no static name in the AST to look up in the registry. (The *existence* of a called method is nevertheless checked separately when the receiver type is statically known and the host supplied a method table — see [`docs/method-check.md`](./method-check.md); the return-site classification stays `Dynamic` regardless.)
   - **`DynamicReason::Expression`** — any other expression, an operator, field/index access (`return a + b;`, `return input.name;`)
 
   Such a return site stays unconfirmed (`unverifiable`) and is not verified further in this version — `is_valid` does not react to it (see `ValidationReport`). Runtime verification with mock inputs, which would close this gap, is deferred — see [`docs/future-runtime-verifier.md`](./future-runtime-verifier.md). The static closure (type inference) is deferred as well, but `DynamicReason` is groundwork prepared for it — see [`docs/future-type-inference.md`](./future-type-inference.md).

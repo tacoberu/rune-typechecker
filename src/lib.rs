@@ -1,40 +1,28 @@
 mod ast_analyzer;
 mod doc_comment;
+mod macros;
+mod method_checker;
 mod signature_registry;
 mod source_text;
 mod static_checker;
+pub mod std_methods;
 mod types;
+
+#[doc(hidden)]
+pub use macros::__method_signature;
 
 use std::collections::{HashMap, HashSet};
 
 use rune::ast;
 
+/// The whole standard library at once; for per-module tables see [`std_methods`].
+pub use std_methods::rune_std_methods;
 pub use types::{
 	BuiltinSignature, CheckerError, Contract, ContractMismatch, DynamicReason, EnumVariant,
-	LiteralValue, ParamDef, PrimitiveType, ReturnSite, ScriptValidationReport, SignatureOrigin,
-	SignatureRegistry, StaticCheckResult, TypeDef, ValidationReport, Violation,
+	Environment, LiteralValue, MethodRegistry, MethodSignature, MethodViolation, ParamDef,
+	PrimitiveType, ReturnSite, ScriptValidationReport, SignatureOrigin, SignatureRegistry,
+	StaticCheckResult, TypeDef, ValidationReport, Violation,
 };
-
-/// Builds a [`Contract`] from a concise signature notation. The type syntax
-/// is the same as in doc-comment contracts (`@param`/`@return`).
-///
-/// ```
-/// use rune_typechecker::contract;
-///
-/// let expected = contract!((sender: String, event: String) -> Status::Solved);
-/// assert_eq!(expected.params.len(), 2);
-/// ```
-///
-/// Panics on invalid syntax — it is meant for signatures hardcoded in host
-/// code. For signatures arriving at runtime (e.g. from configuration) use
-/// [`Contract::parse`], which returns a `Result`.
-#[macro_export]
-macro_rules! contract {
-	($($signature:tt)+) => {
-		$crate::Contract::parse(stringify!($($signature)+))
-			.unwrap_or_else(|e| panic!("invalid contract signature: {e}"))
-	};
-}
 
 /// Main entry point — validates a script before saving (statically),
 /// including recursive verification of helpers reached via `ResolvedCall`.
@@ -43,19 +31,27 @@ pub fn validate_script(
 	function_name: &str,
 	builtins: &[BuiltinSignature],
 ) -> Result<ScriptValidationReport, CheckerError> {
+	let env = Environment {
+		builtins: builtins.to_vec(),
+		..Environment::default()
+	};
+	validate_script_env(source, function_name, &env)
+}
+
+/// Like [`validate_script`], but with the full host [`Environment`] —
+/// including the method table used to statically check the existence of
+/// instance method calls (`receiver.method(...)`).
+pub fn validate_script_env(
+	source: &str,
+	function_name: &str,
+	env: &Environment,
+) -> Result<ScriptValidationReport, CheckerError> {
 	let file = ast_analyzer::parse_file(source)?;
 
 	let mut helpers: HashMap<String, ValidationReport> = HashMap::new();
 	let mut visited: HashSet<String> = HashSet::new();
 
-	let main = validate_function(
-		&file,
-		source,
-		function_name,
-		builtins,
-		&mut helpers,
-		&mut visited,
-	)?;
+	let main = validate_function(&file, source, function_name, env, &mut helpers, &mut visited)?;
 
 	let is_valid = main.is_valid && helpers.values().all(|r| r.is_valid);
 
@@ -82,7 +78,22 @@ pub fn validate_script_against(
 	expected: &Contract,
 	builtins: &[BuiltinSignature],
 ) -> Result<ScriptValidationReport, CheckerError> {
-	let mut report = validate_script(source, function_name, builtins)?;
+	let env = Environment {
+		builtins: builtins.to_vec(),
+		..Environment::default()
+	};
+	validate_script_against_env(source, function_name, expected, &env)
+}
+
+/// Like [`validate_script_against`], but with the full host [`Environment`]
+/// (see [`validate_script_env`]).
+pub fn validate_script_against_env(
+	source: &str,
+	function_name: &str,
+	expected: &Contract,
+	env: &Environment,
+) -> Result<ScriptValidationReport, CheckerError> {
+	let mut report = validate_script_env(source, function_name, env)?;
 	report.contract_mismatches = compare_contracts(expected, &report.main.contract);
 	report.is_valid = report.is_valid && report.contract_mismatches.is_empty();
 	Ok(report)
@@ -121,7 +132,7 @@ fn validate_function(
 	file: &ast::File,
 	source: &str,
 	function_name: &str,
-	builtins: &[BuiltinSignature],
+	env: &Environment,
 	helpers: &mut HashMap<String, ValidationReport>,
 	visited: &mut HashSet<String>,
 ) -> Result<ValidationReport, CheckerError> {
@@ -132,11 +143,13 @@ fn validate_function(
 		ast_analyzer::doc_comment_before(source, item_fn).ok_or(CheckerError::NoDocComment)?;
 	let contract = doc_comment::parse(&doc)?;
 
-	let registry = signature_registry::build(file, source, function_name, builtins)?;
+	let registry = signature_registry::build(file, source, function_name, &env.builtins)?;
 
 	let sites = ast_analyzer::find_return_sites(item_fn, source, &registry);
 	let static_result = static_checker::check(&sites, &contract);
-	let is_valid = static_result.violations.is_empty();
+	let method_violations =
+		method_checker::check(item_fn, source, &contract, &registry, &env.methods);
+	let is_valid = static_result.violations.is_empty() && method_violations.is_empty();
 
 	visited.insert(function_name.to_string());
 
@@ -160,7 +173,7 @@ fn validate_function(
 			continue;
 		}
 
-		let helper_report = validate_function(file, source, &name, builtins, helpers, visited)?;
+		let helper_report = validate_function(file, source, &name, env, helpers, visited)?;
 		helpers.insert(name, helper_report);
 	}
 
@@ -168,6 +181,7 @@ fn validate_function(
 		function_name: function_name.to_string(),
 		contract,
 		static_result,
+		method_violations,
 		is_valid,
 	})
 }
@@ -628,6 +642,45 @@ mod tests {
 		// Both the tail `Ok(int)` and the propagated `Err(String)` are statically verified.
 		assert!(report.main.static_result.unverifiable.is_empty());
 		assert_eq!(report.main.static_result.verified.len(), 2);
+	}
+
+	#[test]
+	fn methods_macro_builds_signatures() {
+		let table = methods![
+			Sender::name() -> String;
+			Sender::fullname();
+			AppContext::lookup() -> Option::Some(ComponentContext) | Option::None;
+			Commands::mod_entries() -> [ModEntry];
+			Stats::snapshot() -> { count: int, label: String };
+		];
+		assert_eq!(table.len(), 5);
+		assert_eq!(table[0].receiver, "Sender");
+		assert_eq!(table[0].name, "name");
+		assert_eq!(
+			table[0].return_type,
+			Some(TypeDef::Primitive(PrimitiveType::String))
+		);
+		assert_eq!(table[1].return_type, None);
+		assert_eq!(
+			table[2].return_type,
+			Some(TypeDef::parse("Option::Some(ComponentContext) | Option::None").unwrap())
+		);
+		assert_eq!(
+			table[3].return_type,
+			Some(TypeDef::parse("[ModEntry]").unwrap())
+		);
+		assert_eq!(
+			table[4].return_type,
+			Some(TypeDef::parse("{ count: int, label: String }").unwrap())
+		);
+	}
+
+	#[test]
+	fn methods_macro_without_trailing_semicolon_and_empty() {
+		let table = methods![Sender::name() -> String];
+		assert_eq!(table.len(), 1);
+		let empty: Vec<MethodSignature> = methods![];
+		assert!(empty.is_empty());
 	}
 
 	#[test]
